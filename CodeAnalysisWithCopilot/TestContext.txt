@@ -1,0 +1,399 @@
+﻿using Ansys.Minerva.Cmd;
+using Ansys.Minerva.Sdk;
+using CliWrap;
+using CliWrap.Buffered;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Xml.Linq;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace Ansys.Minerva.CmdTest
+{
+    internal class TestContext : BaseTestContext
+    {
+        private HttpConnection? _connection;
+        private readonly List<Item> _createdItems = new List<Item>();
+        private readonly List<FileItem> _createdFiles = new List<FileItem>();
+
+        public TestContext(ITestOutputHelper output, string testName) : base(output, testName)
+        {
+            DisposeAsync();
+        }
+
+        public override async Task<HttpConnection> Connect()
+        {
+            if (_connection != null)
+                return _connection;
+            var conn = new HttpConnection(Url);
+            var db = (string)Config.Element("db")!;
+            var user = (string)Config.Element("user")! ?? "admin";
+            var password = (string)Config.Element("password")! ?? "minerva";
+            await conn.LoginAsync(new ExplicitCredentials(db, user, password));
+            _connection = conn;
+            return conn;
+        }
+		public async Task<BufferedCommandResult> RunMain(params string[] args)
+		{
+			using (new EnvVarContext(new Dictionary<string, string?>()
+			{
+				{ "ANS_MINERVA_AUTH__MODE", "explicit" },
+				{ "ANS_MINERVA_AUTH__DATABASE", Database },
+				{ "ANS_MINERVA_AUTH__USER", Username },
+				{ "ANS_MINERVA_AUTH__PASSWORD", (string)Config.Element("password") ?? "minerva" }
+			}))
+				return await RunMainWithoutAuth(args);
+		}
+
+		public async Task<BufferedCommandResult> RunMainWithoutAuth(params string[] args)
+		{
+			using (new EnvVarContext(new Dictionary<string, string?>()
+			{
+				{ "ANS_MINERVA_INTERACTIVE", "console" },
+				{ "ANS_MINERVA_LOGFILE", "stream://stderr" }
+			}))
+			using (var outBuffer = new BufferReplace(Console.Out, Console.SetOut))
+			using (var errBuffer = new BufferReplace(Console.Error, Console.SetError))
+			{
+				var start = DateTimeOffset.UtcNow;
+				var exitCode = await Program.Main(args);
+				var result = new BufferedCommandResult(exitCode, start, DateTimeOffset.UtcNow, outBuffer.ToString(), errBuffer.ToString());
+				if (!result.IsSuccess)
+					throw new InvalidOperationException($"Command execution failed with exit code {exitCode}.\n\nStandard error: {result.StandardError}");
+				Output.WriteLine($"Command `{string.Join(" ", args)}` returned {result.ExitCode} in {result.RunTime}");
+				if (!string.IsNullOrEmpty(result.StandardError))
+					Output.WriteLine(result.StandardError);
+				return result;
+			}
+		}
+
+		private class BufferReplace : IDisposable
+		{
+			private readonly TextWriter _original;
+			private readonly Action<TextWriter> _update;
+			private readonly StringWriter _writer;
+
+			public BufferReplace(TextWriter original, Action<TextWriter> update)
+			{
+				_original = original;
+				_update = update;
+				_writer = new MockWriter();
+				_update(_writer);
+			}
+
+			public override string ToString()
+			{
+				return _writer.ToString();
+			}
+
+			public void Dispose()
+			{
+				_update(_original);
+				_writer.Dispose();
+			}
+
+			private class MockWriter : StringWriter
+			{
+				protected override void Dispose(bool disposing)
+				{
+					// Do nothing
+				}
+			}
+		}
+
+		private class EnvVarContext : IDisposable
+		{
+			private readonly Dictionary<string, string?> _original = new();
+
+			public EnvVarContext(IEnumerable<KeyValuePair<string, string?>> values)
+			{
+				foreach (var value in values)
+				{
+					_original[value.Key] = Environment.GetEnvironmentVariable(value.Key);
+					Environment.SetEnvironmentVariable(value.Key, value.Value);
+				}
+			}
+
+			public void Dispose()
+			{
+				foreach (var value in _original)
+					Environment.SetEnvironmentVariable(value.Key, value.Value);
+				_original.Clear();
+			}
+		}
+
+		public override async Task<BufferedCommandResult> RunProcess(params string[] args)
+        {
+            var cliExecutable = "AnsysMinerva_CLI.exe";
+            var result = await Cli.Wrap(Path.Combine(Environment.CurrentDirectory, OperatingSystem.IsLinux() ? Path.GetFileNameWithoutExtension(cliExecutable) : cliExecutable))
+                .WithArguments(args)
+                .WithEnvironmentVariables(new Dictionary<string, string?>()
+                {
+                    { "ANS_MINERVA_AUTH__MODE", "explicit" },
+                    { "ANS_MINERVA_AUTH__DATABASE", Database },
+                    { "ANS_MINERVA_AUTH__USER", Username},
+                    { "ANS_MINERVA_AUTH__PASSWORD", (string)Config.Element("password")! ?? "minerva" },
+                    { "ANS_MINERVA_INTERACTIVE", "console" },
+                    { "ANS_MINERVA_LOGFILE", "stream://stderr" }
+                })
+                .ExecuteBufferedAsync();
+            Output.WriteLine($"Command `{string.Join(" ", args)}` returned {result.ExitCode} in {result.RunTime}");
+            if (!string.IsNullOrEmpty(result.StandardError))
+                Output.WriteLine(result.StandardError);
+            return result;
+        }
+
+        public string CreateLocalTestFolder()
+        {
+            Directory.CreateDirectory(TestDataDirectory);
+            return TestDataDirectory;
+        }
+
+
+
+        public FileItem CreateRemoteData(FileSize size, string fileName = "")
+        {
+            var file = FileItem.FromStream(new RandomStream(size), fileName != "" ? fileName : UniqueFileName(), size);
+            _createdFiles.Add(file);
+            return file;
+        }
+
+
+        public FileItem CreateRemoteDataWithContent(FileSize size, string fileName = "", string fileContent = "")
+        {
+            byte[] byteArray = Encoding.ASCII.GetBytes(fileContent);
+            MemoryStream stream = new MemoryStream(byteArray);
+            var file = FileItem.FromStream(stream, string.IsNullOrEmpty(fileName) ? UniqueFileName() : fileName, size);
+            _createdFiles.Add(file);
+            return file;
+        }
+
+        public async Task<FolderItem> CreateRemoteSubFolderAsync(FolderItem folderItem, string subFolderName)
+        {
+            var folderView = new FolderViewModel(await Connect());
+            await folderView.TryNavigateToAsync(folderItem);
+            var folder = await folderView.CreateSubdirectoryAsync(subFolderName);
+            return folder;
+        }
+        public async Task<Item> CreateTask(HttpConnection connection)
+        {
+            var task = (await connection.ExecuteAsync(Query.Aml((IFormattable)$@"<Item action='add' type='Ans_SimulationTask'><name>{"Sample⚠💬✅π“‘學_" + Guid.NewGuid().ToArasId()}</name></Item>")))
+                    .AssertItem();
+            _createdItems.Add(task);
+            return task;
+        }
+        public async Task<Item> CreateDependency(HttpConnection connection, string dataId, string dependId)
+        {
+            var task = (await connection.ExecuteAsync(Query.Aml((IFormattable)
+                $@"<Item type='ans_DataDependsOn' action='add'>
+                    <source_id>{dataId}</source_id>
+                    <related_id>{dependId}</related_id>
+                </Item>"))).AssertItem();
+            _createdItems.Add(task);
+            return task;
+        }
+
+        public void CreateNestedFolderStructure()
+        {
+            /**
+             * Folder1
+             *      |
+             *      └──> Folder1.1
+             *      │       |
+             *      │       └──> Folder1.1.1
+             *      │       │          |
+             *      │       │          └──> TextFile1.1.1.1.txt
+             *      |       └──> Folder1.1.2
+             *      └──> Folder1.2
+             *              |
+             *              └──> TextFile1.2.1.txt
+             * 
+            **/
+
+            Directory.CreateDirectory(Path.Combine(TestDataDirectory, "Folder1", "Folder1.1", "Folder1.1.1"));
+            File.Create(Path.Combine(TestDataDirectory, "Folder1", "Folder1.1", "Folder1.1.1", "TextFile1.1.1.1.txt")).Close();
+            Directory.CreateDirectory(Path.Combine(TestDataDirectory, "Folder1", "Folder1.1", "Folder1.1.2"));
+            Directory.CreateDirectory(Path.Combine(TestDataDirectory, "Folder1", "Folder1.2"));
+            File.Create(Path.Combine(TestDataDirectory, "Folder1", "Folder1.2", "TextFile1.2.1.txt")).Close();
+        }
+
+        public async Task<ITestContext> CreateUserContextAsync()
+        {
+            return new UserContext(Output, await Connect(), TestDataDirectory.Split(Path.PathSeparator).Last());
+        }
+
+        public void CreateMultiTypeFileStructure()
+        {
+            //        📁 parent
+            //        │    file.md
+            //        │    README.md
+            //        │
+            //        └───📁 child
+            //            │    file.MD
+            //            │    index.js
+            //            │    more.md
+            //            │    sample.mtext
+            //            │
+            //            ├───📁 assets
+            //            │        image.png
+            //            │        image.svg
+            //            │
+            //            └───📁 grandchild
+            //                     file.md
+            //                     style.css
+            //                     sub.text
+
+            Directory.CreateDirectory(Path.Combine(TestDataDirectory, "parent"));
+            File.Create(Path.Combine(TestDataDirectory, "parent", "file.md")).Close();
+            File.Create(Path.Combine(TestDataDirectory, "parent", "README.md")).Close();
+
+            Directory.CreateDirectory(Path.Combine(TestDataDirectory, "parent", "child"));
+            File.Create(Path.Combine(TestDataDirectory, "parent", "child", "file.MD")).Close();
+            File.Create(Path.Combine(TestDataDirectory, "parent", "child", "index.js")).Close();
+            File.Create(Path.Combine(TestDataDirectory, "parent", "child", "more.md")).Close();
+            File.Create(Path.Combine(TestDataDirectory, "parent", "child", "sample.mtext")).Close();
+
+            Directory.CreateDirectory(Path.Combine(TestDataDirectory, "parent", "child", "assets"));
+            File.Create(Path.Combine(TestDataDirectory, "parent", "child", "assets", "image.png")).Close();
+            File.Create(Path.Combine(TestDataDirectory, "parent", "child", "assets", "image.svg")).Close();
+
+            Directory.CreateDirectory(Path.Combine(TestDataDirectory, "parent", "child", "grandchild"));
+            File.Create(Path.Combine(TestDataDirectory, "parent", "child", "grandchild", "file.md")).Close();
+            File.Create(Path.Combine(TestDataDirectory, "parent", "child", "grandchild", "style.css")).Close();
+            File.Create(Path.Combine(TestDataDirectory, "parent", "child", "grandchild", "sub.text")).Close();
+        }
+
+        public void CreateMultiTypeFileStructure2()
+        {
+            //        📁 TestDataDirectory (root)
+            //        │    Test-file-1.txt
+            //        │    Test-file-2.txt
+            //        │    Test-json-1.json
+            //        │    Test-xml-1.xml
+            //        │
+            //        ├───📁 type1
+            //        │   │    Test-file-3.txt
+            //        │   │    Test-json-2.txt
+            //        │   │
+            //        │   ├───📁 type2
+            //        │   │        Test-file-4.txt
+            //        │   │        Test-json-3.json
+            //        │   │
+            //        │   └───────📁 type3
+            //        │                settings.json
+            //        │                Test-file-5.txt
+            //        │                
+            //        └────📁 type4             
+            //             │    settings.json
+            //             │    Test-xml-2.txt
+            //             │
+            //             └───📁 type2
+            //                      settings.json
+            //                      Test-xml-3.xml
+
+            Directory.CreateDirectory(Path.Combine(TestDataDirectory));
+
+            File.WriteAllText(Path.Combine(TestDataDirectory, "Test-file-1.txt"), "Test-file-1");
+            File.WriteAllText(Path.Combine(TestDataDirectory, "Test-file-2.txt"), "Test-file-2");
+            File.WriteAllText(Path.Combine(TestDataDirectory, "Test-json-1.json"), "Test-json-1");
+            File.WriteAllText(Path.Combine(TestDataDirectory, "Test-xml-1.xml"), "Test-xml-1");
+
+            Directory.CreateDirectory(Path.Combine(TestDataDirectory, "type1"));
+            File.WriteAllText(Path.Combine(TestDataDirectory, "type1/Test-file-3.txt"), "Test-file-3");
+            File.WriteAllText(Path.Combine(TestDataDirectory, "type1/Test-json-2.json"), "Test-json-2");
+
+            Directory.CreateDirectory(Path.Combine(TestDataDirectory, "type1/type2"));
+            File.WriteAllText(Path.Combine(TestDataDirectory, "type1/type2/Test-file-4.txt"), "Test-file-4");
+            File.WriteAllText(Path.Combine(TestDataDirectory, "type1/type2/Test-json-3.json"), "Test-json-3");
+
+            Directory.CreateDirectory(Path.Combine(TestDataDirectory, "type1/type2/type3"));
+            File.WriteAllText(Path.Combine(TestDataDirectory, "type1/type2/type3/Test-file-5.txt"), "Test-file-5");
+            File.WriteAllText(Path.Combine(TestDataDirectory, "type1/type2/type3/settings.json"), "settings.json");
+
+            Directory.CreateDirectory(Path.Combine(TestDataDirectory, "type4"));
+            File.WriteAllText(Path.Combine(TestDataDirectory, "type4/Test-xml-2.xml"), "Test-xml-2");
+            File.WriteAllText(Path.Combine(TestDataDirectory, "type4/settings.json"), "settings.json");
+
+            Directory.CreateDirectory(Path.Combine(TestDataDirectory, "type4/type2"));
+            File.WriteAllText(Path.Combine(TestDataDirectory, "type4/type2/settings.json"), "settings.json");
+            File.WriteAllText(Path.Combine(TestDataDirectory, "type4/type2/Test-xml-3.xml"), "Test-xml-3");
+        }
+
+
+        public void CreateMinervaIgnoreFile(List<string> globs)
+        {
+            if (!Directory.Exists(Path.Combine(TestDataDirectory, ".minerva")))
+                Directory.CreateDirectory(Path.Combine(TestDataDirectory, ".minerva"));
+
+            var minervaIgnorePath = Path.Combine(TestDataDirectory, ".minervaignore");
+            File.Create(minervaIgnorePath).Close();
+
+            using (var writer = new StreamWriter(minervaIgnorePath, true))
+            {
+                foreach (var glob in globs)
+                {
+                    writer.WriteLine(glob);
+                }
+            }
+        }
+
+        public async Task<FileItem> GetFilePresentInRemoteFolderAsync(string fileName, string folderName)
+        {
+            var validateFolderView = new FolderViewModel(await Connect());
+            await validateFolderView.TryNavigateToDefaultAsync();
+            var path = FileSystemFilter.FromGlobs(folderName);
+            var matches = await validateFolderView.GetFileSystemItemsAsync(path);
+            bool result = await validateFolderView.TryNavigateToAsync(matches.Single());
+
+            Assert.True(result);
+
+            path = FileSystemFilter.FromGlobs(fileName);
+            return (await validateFolderView.GetFileSystemItemsAsync(path)).OfType<FileItem>().Single();
+        }
+
+        public override async ValueTask DisposeAsync()
+        {
+            if (Directory.Exists(TestDataDirectory))
+                Directory.Delete(TestDataDirectory, true);
+
+            if (_createdFolders.Count > 0)
+            {
+                var rootFolderView = new FolderViewModel(_connection);
+                await rootFolderView.TryNavigateToDefaultAsync();
+                await rootFolderView.DeleteAsync(_createdFolders);
+                _createdFolders.Clear();
+            }
+            if (_connection == null)
+                return;
+            if (_createdFiles.Count > 0)
+            {
+                var idlist = new List<string>();
+                foreach (var file in _createdFiles)
+                {
+                    idlist.Add($"'{file.Id}'");
+                }
+                var deleteCreatedFilesQuery = new Item(_connection.Session);
+                deleteCreatedFilesQuery.Type = "ans_Data";
+                deleteCreatedFilesQuery.Action = "delete";
+                deleteCreatedFilesQuery.Attributes.Add("where", $"ans_Data.local_file in ({string.Join(",", idlist)})");
+                (await _connection.ExecuteAsync(Query.Aml(deleteCreatedFilesQuery))).AssertNoError();
+                _createdFiles.Clear();
+            }
+            if (_createdItems.Count > 0)
+            {
+                _createdItems.ForEach(async e =>
+                {
+                    await _connection.ExecuteAsync(Query.DeleteAllVersions(e));
+                });
+                _createdItems.Clear();
+            }
+
+            await _connection.LogoutAsync();
+            _connection = null;
+        }
+    }
+}

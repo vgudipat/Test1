@@ -1,0 +1,244 @@
+﻿using Ansys.Minerva.Sdk;
+using Newtonsoft.Json;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace Ansys.Minerva.CmdTest.DigitalThreadTest
+{
+    [Collection("Serial")]
+    public class DigitalThreadIntegrationTest 
+    {
+        private readonly ITestOutputHelper _output;
+
+        private readonly string fileSyncPath = Path.Combine(".minerva", "FileSync.json");
+
+        private readonly string taskInputName = "ans_SimTask_Input";
+
+        private readonly string taskOutputName = "ans_SimTask_Output";
+
+        private readonly string uploadCommandName = "upload";
+
+        private readonly string downloadCommandName = "download";
+
+        public DigitalThreadIntegrationTest(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+        [Fact]
+        public async Task TestDigitalThreadOnDownloadWithSession()
+        {
+            var folderToDownload = DateTime.UtcNow.ToString("yyMMddHHmmss");
+
+            await using var context = new TestContext(_output, nameof(TestDigitalThreadOnDownloadWithSession));
+            var conn = await context.Connect();
+
+            var uploadedEntries =  await UploadTestDataSet(context, folderToDownload, conn);
+            await PrepareDataSetForCLI(downloadCommandName, context, folderToDownload, true);
+
+            var ifTaskCreated = TryGetDigitalThread(context, conn, out Item ? task);
+            Assert.True(ifTaskCreated, "Task Creation failed for Download");
+            Assert.False(task is null, "Task Creation failed for Download");
+
+            // 1. Verify the task Input to have all the requested fileSystemItems
+            var fileFolderInTask = await GetTaskFilesByContainerAsync(conn, new ContainerLocator($"Ans_SimulationTask/{task?.Id}/{taskInputName}"));
+
+            // 2. Check if all files are present on input and their relative paths are correct as per upload trace.
+            fileFolderInTask.ForEach(i =>
+            {
+                var fileInUploadTrace = uploadedEntries.Where(j => j.Name.Equals(i.Name)).FirstOrDefault();
+                Assert.True(fileInUploadTrace is not null, $"File {i.Name} not found on the input container of Digital Thread with ID {task?.KeyedName}");
+                bool pathEqual = NormalizePath(i.RelativePath) == NormalizePath(Path.Combine(folderToDownload, fileInUploadTrace?.RelativePath ?? ""));
+                Assert.True(pathEqual, $"Folder Path of File {i.Name} not matching on Digital Thread with ID {task?.KeyedName}");
+            });
+        }
+
+        [Fact]
+        public async Task TestDigitalThreadOnDownloadWithNoSession()
+        {
+            var folderToDownload = DateTime.UtcNow.ToString("yyMMddHHmmss");
+
+            await using var context = new TestContext(_output, nameof(TestDigitalThreadOnDownloadWithNoSession));
+            var conn = await context.Connect();
+
+            var uploadedEntries = await UploadTestDataSet(context, folderToDownload, conn);
+            await PrepareDataSetForCLI(downloadCommandName, context, folderToDownload, false);
+
+            var ifTaskCreated = TryGetDigitalThread(context, conn, out Item? task);
+            Assert.True(task is null, "Task Created for a no session request for Download");
+        }
+
+        [Fact]
+        public async Task TestDigitalThreadOnUploadWithSession()
+        {
+            var folderToUpload = DateTime.UtcNow.ToString("yyMMddHHmmss");
+            
+            await using var context = new TestContext(_output, nameof(TestDigitalThreadOnUploadWithSession));
+            var conn = await context.Connect();
+            context.CreateNestedFolderStructure();
+            var remoteDir = await context.CreateRemoteTestFolderAsync(folderToUpload);
+
+            await PrepareDataSetForCLI(uploadCommandName, context, folderToUpload, true);
+
+            // Modify the NestedStructure like (TextFile1.1.1.1.txt) & trigger another upload through CLI:
+            var filesInUpload = Directory.GetFiles(context.TestDataDirectory, "*", SearchOption.AllDirectories).Skip(2);
+            foreach(var file in filesInUpload)
+            {
+                using StreamWriter w = File.AppendText(file);
+                w.WriteLine("ModifiedContent!!!!!!!!!!!!!!!!!!!!!!!********$$$$$$$$$$$$$$$$");
+                w.WriteLine("ModifiedContent!!!!!!!!!!!!!!!!!!!!!!!********$$$$$$$$$$$$$$$$");
+            }
+            await PrepareDataSetForCLI(uploadCommandName, context, folderToUpload, true);
+
+            var ifTaskCreated = TryGetDigitalThread(context, conn, out Item? task);
+            Assert.True(ifTaskCreated, "Task Creation failed for Upload");
+            Assert.False(task is null, "Task Creation failed for Upload");
+
+            // 1. Verify the task Input to have all the requested fileSystemItems
+            var fileFolderInTaskInput = await GetTaskFilesByContainerAsync(conn, new ContainerLocator($"Ans_SimulationTask/{task?.Id}/{taskInputName}"));
+
+            // 2. Check if all files are present on input and their relative paths are correct as per upload trace.
+            fileFolderInTaskInput.ForEach(i =>
+            {
+                var fileInUploadTrace = filesInUpload.Where(j => Path.GetFileName(j).Equals(i.Name)).FirstOrDefault();
+                Assert.True(fileInUploadTrace is not null, $"File {i.Name} not found on the input container of Digital Thread with name {task?.KeyedName}");
+            });
+
+            // 3. Verify the task output to have all the requested fileSystemItems
+            var fileFolderInTaskOutput = await GetTaskFilesByContainerAsync(conn, new ContainerLocator($"Ans_SimulationTask/{task?.Id}/{taskOutputName}"));
+
+            // 4. Check if all files are present on output and their relative paths are correct as per upload trace.
+            fileFolderInTaskOutput.ForEach(i =>
+            {
+                var fileInUploadTrace = filesInUpload.Where(j => Path.GetFileName(j).Equals(i.Name)).FirstOrDefault();
+                Assert.True(fileInUploadTrace is not null, $"File {i.Name} not found on the input container of Digital Thread with name {task?.KeyedName}");
+            });
+        }
+
+        [Fact]
+        public async Task TestDigitalThreadOnUploadWithNoSession()
+        {
+            var folderToUpload = DateTime.UtcNow.ToString("yyMMddHHmmss");
+
+            await using var context = new TestContext(_output, nameof(TestDigitalThreadOnUploadWithNoSession));
+            var conn = await context.Connect();
+            context.CreateNestedFolderStructure();
+            var remoteDir = await context.CreateRemoteTestFolderAsync(folderToUpload);
+
+            await PrepareDataSetForCLI(uploadCommandName, context, folderToUpload, false);
+
+            // Modify the NestedStructure like (TextFile1.1.1.1.txt) & trigger another upload through CLI:
+            var filesInUpload = Directory.GetFiles(context.TestDataDirectory, "*", SearchOption.AllDirectories).Skip(1);
+            foreach (var file in filesInUpload)
+            {
+                using StreamWriter w = File.AppendText(file);
+                w.WriteLine("ModifiedContent!!!!!!!!!!!!!!!!!!!!!!!********$$$$$$$$$$$$$$$$");
+                w.WriteLine("ModifiedContent!!!!!!!!!!!!!!!!!!!!!!!********$$$$$$$$$$$$$$$$");
+            }
+            await Assert.ThrowsAsync<CliWrap.Exceptions.CommandExecutionException>(async () => await PrepareDataSetForCLI(uploadCommandName, context, folderToUpload, false));
+
+            var ifTaskCreated = TryGetDigitalThread(context, conn, out Item? task);
+            Assert.True(task is null, "Task Created for a no session request for upload");
+        }
+
+        private bool TryGetDigitalThread(TestContext context, HttpConnection conn, out Item ? task)
+        {
+            try
+            {
+                var filePath = Path.Combine(context.TestDataDirectory.ToString(), fileSyncPath);
+                using StreamReader reader = new(filePath, new FileStreamOptions() { Access = FileAccess.Read, Share = FileShare.Read, Mode = FileMode.Open });
+                string json = reader.ReadToEnd();
+                var data = JsonConvert.DeserializeObject<Dictionary<string, object>>(json);
+                if(data!.TryGetValue("SessionId", out object ? taskId))
+                {
+                    if(string.IsNullOrEmpty(taskId?.ToString()))
+                    {
+                        task = null;
+                        return false;
+                    }
+                    else
+                    {
+                        task = new Item(conn.Session)
+                        {
+                            Type = "Ans_SimulationTask",
+                            Id = taskId.ToString(),
+                        };
+                        task.Attributes.Set("select", "id,keyed_name");
+                        task = conn.Execute(Query.Aml(task)).AssertItem();
+                        return true;
+                    } 
+                }
+                else
+                {
+                    task = null;
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                _output.WriteLine(ex.ToString());
+                task = null;
+                return false;
+            }
+        }
+
+        private static IEnumerable<IFileSystemItem> GetUploadStructure(string directory)
+        {
+            var files = Directory.GetFiles(directory, "*", SearchOption.AllDirectories);
+            var folders = Directory.GetDirectories(directory, "*", SearchOption.AllDirectories);
+            var entries = files.Select(i => FileItem.FromFile(i).RelativeTo(directory)).ToList();
+            entries.AddRange(folders.Select(i => FolderItem.FromFolder(i).RelativeTo(directory)));
+            return entries;
+        }
+
+        private static async Task PrepareDataSetForCLI(string commandName, TestContext context, string folderToDownload, bool sessionNeeded)
+        {
+            List<string> downloadCommandContructor = new()
+            {
+                commandName,
+                "-u",
+                context.Url.ToString(),
+                "-r",
+                $"/Data/{folderToDownload}/",
+                "-l",
+                context.TestDataDirectory
+            };
+            if (!sessionNeeded)
+                downloadCommandContructor.Add("-n");
+            await context.RunProcess(downloadCommandContructor.ToArray());
+        }
+        
+        private async Task<IEnumerable<IFileSystemItem>> UploadTestDataSet(TestContext context, string folderToDownload, HttpConnection conn)
+        {
+            context.CreateNestedFolderStructure();
+
+            var remoteDir = await context.CreateRemoteTestFolderAsync(folderToDownload);
+            var vaultConn = await conn.VaultAsync();
+            var folderView = new FolderViewModel(conn);
+            var uploadedEntries = GetUploadStructure(context.TestDataDirectory);
+            await vaultConn.UploadFilesAsync(conn, remoteDir.Container, uploadedEntries, overwrite: _ => OverwriteMode.Overwrite);
+            return uploadedEntries;
+        }
+
+        private static async Task<List<IFileSystemItem>> GetTaskFilesByContainerAsync(HttpConnection conn, ContainerLocator locator)
+        {
+            return (await conn.ExecuteAsync(Query.GetFileSystemEntries(locator)
+                                                                    .WithFolders(FolderMode.None)
+                                                                    .WithExpandedShortcuts(false)
+                                                                    .WithDependencies(false)
+                                                                    .WithAllLevels()))
+                                                                    .ToList();
+        }
+
+        private static string NormalizePath(string path)
+        {
+            return Path.GetFullPath(path)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+    }
+}

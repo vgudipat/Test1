@@ -1,0 +1,122 @@
+﻿using Ansys.Minerva.IntegrationFramework.Common.Contract.Env;
+using Ansys.Minerva.IntegrationFramework.Common.Env;
+using Ansys.Minerva.IntegrationFramework.Common;
+using Ansys.Minerva.IntegrationFramework.SdkImpl.Services;
+using Ansys.Minerva.IntegrationFramework.SdkImpl;
+using Microsoft.Extensions.Options;
+using Moq;
+using System;
+using System.Collections.Generic;
+using System.IO.Abstractions.TestingHelpers;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
+
+namespace Ansys.Minerva.CmdTest.Mocks
+{
+    public class MockFileSyncJson : IDisposable
+    {
+        public string TestDataDirectory { get; private set; }
+
+        public List<string> Files { get; private set; }
+
+        public Session Session { get; private set; }
+
+        public MockFileSystem mockFileSystem { get; }
+        //Arrange : Test data Initialization
+        public MockFileSyncJson()
+        {
+            TestDataDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "TestData", nameof(MockFileSyncJson));
+            if (!Directory.Exists(TestDataDirectory))
+                Directory.CreateDirectory(TestDataDirectory);
+
+            if (!Directory.Exists(Path.Combine(TestDataDirectory, ".minerva")))
+                Directory.CreateDirectory(Path.Combine(TestDataDirectory, ".minerva"));
+
+            if (!Directory.Exists(Path.Combine(TestDataDirectory, "Test-Folder")))
+                Directory.CreateDirectory(Path.Combine(TestDataDirectory, "Test-Folder"));
+
+            File.WriteAllText(Path.Combine(TestDataDirectory, ".minerva/FileSync.json"), GetFileSyncJsonString());
+            File.WriteAllText(Path.Combine(TestDataDirectory, "Test-file-1.txt"), "Testing stage unstage services");
+            File.WriteAllText(Path.Combine(TestDataDirectory, "Test-file-2.txt"), "Testing stage unstage services-Test-Data2");
+            File.WriteAllText(Path.Combine(TestDataDirectory, "Test-Folder/Test-file-3.txt"), "Testing stage unstage services-Test-Data3");
+
+            Files = new List<string>() { ".minerva/FileSync.json", "Test-file-1.txt", "Test-file-2.txt", "Test-Folder/Test-file-3.txt" };
+            var mockFileDir = Files.ToDictionary(
+                x => Path.Combine(TestDataDirectory, x),
+                x => new MockFileData(File.ReadAllText(Path.Combine(TestDataDirectory, x))));
+
+            mockFileSystem = new MockFileSystem(mockFileDir);
+            CmdEnvironment cmdEnvironment = new CmdEnvironment(mockFileSystem.FileSystem);
+            IConfiguration configuration = Mock.Of<IConfiguration>();
+            var mockSettings = new Mock<IOptions<RemoteOptions>>();
+            mockSettings.Setup(o => o.Value).Returns(new RemoteOptions()
+            {
+                Local = TestDataDirectory
+            });
+
+            SessionPathProvider sessionPathProvider = new SessionPathProvider(mockSettings.Object, cmdEnvironment, mockFileSystem.FileSystem, configuration);
+            Session = new Session(mockFileSystem.FileSystem, sessionPathProvider);
+
+        }
+
+        //Test Teardown - Clean the TestDataDirectory
+        public void Dispose()
+        {
+            //if (Directory.Exists(TestDataDirectory))
+            //    Directory.Delete(TestDataDirectory, true);
+        }
+
+        private string GetFileSyncJsonString()
+        {
+            return
+                @"{
+                    ""WorkingDir"": """",
+                    ""SessionId"": ""96CC2B04D3ED494984B2A58348FFB52F"",
+                    ""Staged"": [],
+                    ""Index"": {
+                    ""Test-file-1.txt"": {
+                        ""Modified"": ""2023-05-03T01:57:48-04:00"",
+                        ""Checksum"": ""ECA2440A9575A778ED7B8837F9B25A4B"",
+                        ""Id"": ""1B969B9E6DE14C82A1A8318FB8251206"",
+                        ""RemoteRoot"": null,
+                        ""IsDirectory"": false,
+                        ""Branch"": ""Default"",
+                        ""Revision"": ""001"",
+                        ""Location"": null,
+                        ""Path"": ""Test-file-1.txt"",
+                        ""Size"": 602
+                    },
+                    ""Test-file-2.txt"": {
+                        ""Modified"": ""2023-05-03T01:57:49-04:00"",
+                        ""Checksum"": ""50FB99C0987CD3EFC5E92A88FBA66B0E"",
+                        ""Id"": ""C9C4EC1B636843CC8F49B6E4675D187D"",
+                        ""RemoteRoot"": null,
+                        ""IsDirectory"": false,
+                        ""Branch"": ""Default"",
+                        ""Revision"": ""001"",
+                        ""Location"": null,
+                        ""Path"": ""Test-file-2.txt"",
+                        ""Size"": 4287
+                    },
+                    ""Test-Folder/Test-file-3.txt"": {
+	                    ""Modified"":""2023-04-25T06:28:44-04:00"",
+                        ""Checksum"":""D41D8CD98F00B204E9800998ECF8427E"",
+	                    ""Id"":""80DE775119984FAC86F480AB7907C656"",
+	                    ""RemoteRoot"":null,
+	                    ""IsDirectory"":false,
+	                    ""Branch"":""Default"",
+	                    ""Revision"":""001"",
+	                    ""Location"":""Ans_Data / A7713D7E54DC4800A1156490063D4DE9 / local_file"",
+	                    ""Path"":""Test-Folder/Test-file-3.txt"",
+	                    ""Size"":0
+                    }
+                    },
+                    ""PendingUploads"": []
+                }";
+        }
+
+    }
+}

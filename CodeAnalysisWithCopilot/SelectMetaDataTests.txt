@@ -1,0 +1,433 @@
+﻿using Ansys.Minerva.CmdTest.FetchStatusTests;
+using Ansys.Minerva.IntegrationFramework.Common.Env;
+using Ansys.Minerva.IntegrationFramework.SdkImpl;
+using Ansys.Minerva.Sdk;
+using Newtonsoft.Json;
+using System;
+using System.Linq;
+using Xunit;
+using Item = Ansys.Minerva.Sdk.Item;
+
+namespace Ansys.Minerva.CmdTest.SdkImplTests
+{
+    public class SelectMetaDataTests
+	{
+		private static Sdk.Session _usEasternSession = new Sdk.Session(TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time"));
+
+		private static string DateInTimeZone(string date)
+		{
+			if (!_usEasternSession.TryParseDateTime(date, out var zoned))
+				throw new InvalidOperationException($"Invalid date: {date}");
+			return zoned.Value.ToDateTimeOffset().ToString("yyyy-MM-ddTHH:mm:ssK");
+		}
+
+		#region Unit test for GenerateLocalFileMeta
+		[Theory]
+        [InlineData("scenario1.txt", PathStatusType.Added, false)]
+        [InlineData("scenario2.txt", PathStatusType.Modified, true)]
+        [InlineData("Test/scenario3.txt", PathStatusType.NoChange, false)]
+        public void GenerateLocalFileMeta(string path, PathStatusType status, bool staged)
+        {
+            //Arrange
+            PathStatus pathStatus = new PathStatus() { Path = path, Status = status, Staged = staged };
+            var mockedLocalData = new LocalData() { Path = path, Status = status.ToString(), Staged = staged };
+
+            //Act
+            var actualLocalData = LocalData.GenerateLocalFileMeta(pathStatus);
+
+            //Assert
+            Assert.NotNull(actualLocalData);
+            Assert.Equal(JsonConvert.SerializeObject(mockedLocalData), JsonConvert.SerializeObject(actualLocalData));
+        }
+        #endregion
+
+        #region Unit test for FromDataItem
+        [Fact]
+        public void Test_FromDataItem()
+        {
+            var folderItem = MockFolderItem();
+
+            var pathStatus = new PathStatus() { Path = "TestFolder", Status = PathStatusType.NoChange, Staged = false, IsDirectory = true };
+            var userOptions = new UserOptions() { UserId = Guid.NewGuid().ToArasId(), Url = "http://localhost/ansysminerva" };
+
+            var expectedResult = new SelectMetaData()
+            {
+                IsDirectory = true,
+                Remote = new RemoteData()
+                {
+                    Name = "TestFolder",
+					ModifiedOn = DateInTimeZone("2023-12-18T01:38:12"),
+					Locator = "Ans_Data/BE51BFCA8E904F578FBF400137F68FE3",
+                    Revision = "001",
+                    Branch = "Default",
+                    Path = "/Data/TestFolder",
+                    Url = "http://localhost/ansysminerva?StartItem=Ans_Data:BE51BFCA8E904F578FBF400137F68FE3",
+                    IsLatest = true,
+                    LifeCycleState = "Uncontrolled",
+                    LockedById = new ClaimData() { Status = ClaimType.ClaimedByAnother.ToString(), KeyedName = "Ansys Admin", Id = "30B991F927274FA3829655F50C99472E" }
+                },
+                Local = new LocalData() { Path = pathStatus.Path, Staged = pathStatus.Staged, Status = pathStatus.Status.ToString() },
+            };
+            var actualResult = SelectMetaData.FromDataItem(folderItem, userOptions, pathStatus);
+
+            Assert.NotNull(actualResult);
+            Assert.Equal(JsonConvert.SerializeObject(expectedResult), JsonConvert.SerializeObject(actualResult));
+
+        }
+
+        #endregion
+
+        #region Unit test for FromExternalLinkShortcutItem
+        [Fact]
+        public void Test_FromExternalLinkShortcutItem()
+        {
+            var shortcutItem = MockURLShortcutItem();
+
+            var pathStatus = new PathStatus() { Path = "TestFolder", Status = PathStatusType.NoChange, Staged = false, IsDirectory = true };
+            var userOptions = new UserOptions() { UserId = Guid.NewGuid().ToArasId(), Url = "http://localhost/ansysminerva" };
+
+            var expectedResult = new SelectMetaData()
+            {
+                IsDirectory = false,
+                Remote = new RemoteData()
+                {
+                    Name = "Test.url",
+					ModifiedOn = DateInTimeZone("2024-02-09T01:28:50"),
+					Locator = "Ans_Data/6E5AA6A722B848FD91176259B64DFC67",
+                    Revision = "001",
+                    FixedRevision = null,
+                    Branch = "Default",
+                    MimeType = "",
+                    Size = "60",
+                    Checksum = "",
+                    Path = "/Data/Test",
+                    Url = "http://localhost/ansysminerva?StartItem=Ans_Data:6E5AA6A722B848FD91176259B64DFC67",
+                    IsLatest = true,
+                    LifeCycleState = "In Work",
+                    LockedById = new ClaimData() { Status = ClaimType.NotClaimed.ToString(), KeyedName = "", Id = "" }
+                },
+                Local = new LocalData() { Path = pathStatus.Path, Staged = pathStatus.Staged, Status = pathStatus.Status.ToString() },
+            };
+            var actualResult = SelectMetaData.FromShortcut(shortcutItem, userOptions, pathStatus);
+
+            Assert.NotNull(actualResult);
+            Assert.Equal(JsonConvert.SerializeObject(expectedResult), JsonConvert.SerializeObject(actualResult));
+        }
+
+        #endregion
+
+        #region Unit test for FromAnsDataShortcutItem
+        [Fact]
+        public void Test_FromAnsDataShortcutItem()
+        {
+            var shortcutItem = MockAnsDataShortcutItem();
+
+            var pathStatus = new PathStatus() { Path = "TestFolder", Status = PathStatusType.NoChange, Staged = false, IsDirectory = true };
+            var userOptions = new UserOptions() { UserId = Guid.NewGuid().ToArasId(), Url = "http://localhost/ansysminerva" };
+
+            var expectedResult = new SelectMetaData()
+            {
+                IsDirectory = false,
+                Remote = new RemoteData()
+                {
+                    Name = "SimpleTextFile.txt",
+					ModifiedOn = DateInTimeZone("2024-02-08T05:11:01"),
+					Locator = "Ans_Data/32CB45CB445D4C95916CD2A9D29809FD/local_file",
+                    Revision = "001",
+                    FixedRevision = null,
+                    Branch = "Default",
+                    MimeType = "",
+                    Size = "53",
+                    Checksum = "1D70935DED4A811E6E6ABB3D74A97723",
+                    Path = "/Data/test-data-2/SimpleTextFile.txt",
+                    Url = "http://localhost/ansysminerva?StartItem=Ans_Data:32CB45CB445D4C95916CD2A9D29809FD",
+                    IsLatest = true,
+                    LifeCycleState = "In Work",
+                    LockedById = new ClaimData() { Status = ClaimType.NotClaimed.ToString(), KeyedName = "", Id = "" }
+                },
+                Local = new LocalData() { Path = pathStatus.Path, Staged = pathStatus.Staged, Status = pathStatus.Status.ToString() },
+            };
+            var actualResult = SelectMetaData.FromShortcut(shortcutItem, userOptions, pathStatus);
+
+            Assert.NotNull(actualResult);
+            Assert.Equal(JsonConvert.SerializeObject(expectedResult), JsonConvert.SerializeObject(actualResult));
+        }
+
+        #endregion
+
+        #region Unit test for FromItemShortcutItem
+        [Fact]
+        public void Test_FromItemShortcutItem()
+        {
+            var shortcutItem = MockItemShortcutItem();
+
+            var pathStatus = new PathStatus() { Path = "TestFolder", Status = PathStatusType.NoChange, Staged = false, IsDirectory = true };
+            var userOptions = new UserOptions() { UserId = Guid.NewGuid().ToArasId(), Url = "http://localhost/ansysminerva" };
+
+            var expectedResult = new SelectMetaData()
+            {
+                IsDirectory = true,
+                Remote = new RemoteData()
+                {
+                    Name = "#1000152",
+					ModifiedOn = DateInTimeZone("2024-02-09T02:00:43"),
+					Locator = "Ans_Data/0D70ADAC2C3640F89BD24DF658D4D1CB",
+                    Revision = "001",
+                    FixedRevision = null,
+                    Branch = "Default",
+                    MimeType = null,
+                    Size = null,
+                    Checksum = null,
+                    Path = "/Data/Item Shc",
+                    Url = "http://localhost/ansysminerva?StartItem=Ans_Data:0D70ADAC2C3640F89BD24DF658D4D1CB",
+                    IsLatest = true,
+                    LifeCycleState = "In Work",
+                    LockedById = new ClaimData() { Status = ClaimType.NotClaimed.ToString(), KeyedName = "", Id = "" }
+                },
+                Local = new LocalData() { Path = pathStatus.Path, Staged = pathStatus.Staged, Status = pathStatus.Status.ToString() },
+            };
+            var actualResult = SelectMetaData.FromShortcut(shortcutItem, userOptions, pathStatus);
+
+            Assert.NotNull(actualResult);
+            Assert.Equal(JsonConvert.SerializeObject(expectedResult), JsonConvert.SerializeObject(actualResult));
+        }
+
+        #endregion
+
+        #region Unit test for GenerateFileFolderMeta
+        [Fact]
+        public void Test_GenerateFileFolderMeta()
+        {
+            var fileItem = MockFileItem();
+            var userOptions = new UserOptions() { UserId = Guid.NewGuid().ToArasId(), Url = "http://localhost/ansysminerva" };
+
+            var expectedResult = new RemoteData()
+            {
+                Name = "test.txt",
+				ModifiedOn = DateInTimeZone("2024-01-19T02:41:42"),
+				Locator = "Ans_Data/393E2120BBEE410AA8C873FD0BE32913/local_file",
+                Revision = "001",
+                Branch = "Default",
+                Path = "/Data/Test/test.txt",
+                Url = "http://localhost/ansysminerva?StartItem=Ans_Data:393E2120BBEE410AA8C873FD0BE32913",
+                IsLatest = true,
+                LifeCycleState = "In Work",
+                MimeType = "text/plain",
+                Size = "71242",
+                Checksum = "4B98B9BB429BCA3343DD4B43E41CAD86",
+                LockedById = new ClaimData() { Status = ClaimType.NotClaimed.ToString(), KeyedName = "", Id = "" }
+            };
+
+            var actualResult = RemoteData.GenerateFileFolderMeta(fileItem, userOptions);
+
+            Assert.NotNull(actualResult);
+            Assert.Equal(JsonConvert.SerializeObject(expectedResult), JsonConvert.SerializeObject(actualResult));
+
+        }
+
+        #endregion
+
+        #region Unit test for GenerateShortcutMeta
+        [Fact]
+        public void Test_GenerateShortcutMeta()
+        {
+            var fileItem = MockURLShortcutItem();
+            var userOptions = new UserOptions() { UserId = Guid.NewGuid().ToArasId(), Url = "http://localhost/ansysminerva" };
+
+            var expectedResult = new RemoteData()
+            {
+                Name = "Test.url",
+				ModifiedOn = DateInTimeZone("2024-02-09T01:28:50"),
+				Locator = "Ans_Data/6E5AA6A722B848FD91176259B64DFC67",
+                Revision = "001",
+                FixedRevision = null,
+                Branch = "Default",
+                MimeType = "",
+                Size = "60",
+                Checksum = "",
+                Path = "/Data/Test",
+                Url = "http://localhost/ansysminerva?StartItem=Ans_Data:6E5AA6A722B848FD91176259B64DFC67",
+                IsLatest = true,
+                LifeCycleState = "In Work",
+                LockedById = new ClaimData() { Status = ClaimType.NotClaimed.ToString(), KeyedName = "", Id = "" }
+            };
+
+            var actualResult = RemoteData.GenerateShortCutMeta(fileItem, userOptions);
+
+            Assert.NotNull(actualResult);
+            Assert.Equal(JsonConvert.SerializeObject(expectedResult), JsonConvert.SerializeObject(actualResult));
+        }
+        #endregion
+
+        #region Unit test for GenerateClaimMeta method
+        [Theory]
+        [InlineData("30B991F927274FA3829655F50C99472E", "30B991F927274FA3829655F98C99476D")]
+        [InlineData("30B991F927274FA3829655F50C99472E", "30B991F927274FA3829655F50C99472E")]
+        public void Test_GenerateClaimMeta(string lockedByID, string userId)
+        {
+            var lockedItem = MockFolderItem();
+            var expectedResult = new ClaimData() { Status = lockedByID!=userId ? ClaimType.ClaimedByAnother.ToString() : ClaimType.ClaimedByMe.ToString(), KeyedName = "Ansys Admin", Id = "30B991F927274FA3829655F50C99472E" };
+            var actualResult = ClaimData.GenerateClaimMeta(lockedItem, userId);
+            Assert.Equal(JsonConvert.SerializeObject(expectedResult), JsonConvert.SerializeObject(actualResult));
+        }
+        #endregion
+
+        #region Helper Methods
+        public static Item MockFolderItem()
+		{
+			return Item.Parse(_usEasternSession, @"<Item type=""Ans_Data"" typeId=""D441339CBF2644D9A231FE952C627322"" id=""BE51BFCA8E904F578FBF400137F68FE3"">
+	                                                    <branch keyed_name=""Default"" type=""ans_Branch"">842256A605764CC19050D6847E8A90AA</branch>
+	                                                    <classification>Folder</classification>
+	                                                    <id keyed_name=""TestFolder"" type=""Ans_Data"">BE51BFCA8E904F578FBF400137F68FE3</id>
+	                                                    <is_folder>1</is_folder>
+	                                                    <is_latest>1</is_latest>
+	                                                    <keyed_name>TestFolder</keyed_name>
+	                                                    <local_file is_null=""1""/>
+	                                                    <locked_by_id keyed_name=""Ansys Admin"" type=""User"">30B991F927274FA3829655F50C99472E</locked_by_id>
+	                                                    <major_rev>001</major_rev>
+	                                                    <modified_on>2023-12-18T01:38:12</modified_on>
+	                                                    <path>/Data/</path>
+	                                                    <remote_url is_null=""1""/>
+	                                                    <state>Uncontrolled</state>
+	                                                    <itemtype>D441339CBF2644D9A231FE952C627322</itemtype>
+	                                                    <url>Ans_Data/BE51BFCA8E904F578FBF400137F68FE3</url>
+                                                        </Item>");
+     
+        }
+
+        public static Item MockFileItem()
+		{
+			return Item.Parse(_usEasternSession, @"<Item type=""Ans_Data"" typeId=""D441339CBF2644D9A231FE952C627322"" id=""393E2120BBEE410AA8C873FD0BE32913"">
+	                                                        <branch keyed_name=""Default"" type=""ans_Branch"">842256A605764CC19050D6847E8A90AA</branch>
+	                                                        <classification>File/Simulation/Ansys</classification>
+	                                                        <id keyed_name=""test.txt"" type=""Ans_Data"">393E2120BBEE410AA8C873FD0BE32913</id>
+	                                                        <is_folder>0</is_folder>
+	                                                        <is_latest>1</is_latest>
+	                                                        <keyed_name>test.txt</keyed_name>
+	                                                        <local_file keyed_name=""test.txt"" type=""File"">
+		                                                        <Item type=""File"" typeId=""8052A558B9084D41B9F11805E464F443"" id=""0B337BD03EBF460D93A5C1779153F999"">
+			                                                        <checksum>4B98B9BB429BCA3343DD4B43E41CAD86</checksum>
+			                                                        <file_size>71242</file_size>
+			                                                        <id keyed_name=""test.txt"" type=""File"">0B337BD03EBF460D93A5C1779153F999</id>
+			                                                        <mimetype>text/plain</mimetype>
+		                                                        </Item>
+	                                                        </local_file>
+	                                                        <locked_by_id is_null=""1""/>
+	                                                        <major_rev>001</major_rev>
+	                                                        <modified_on>2024-01-19T02:41:42</modified_on>
+	                                                        <path>/Data/Test/</path>
+	                                                        <remote_url is_null=""1""/>
+	                                                        <state>In Work</state>
+	                                                        <itemtype>D441339CBF2644D9A231FE952C627322</itemtype>
+	                                                        <url>Ans_Data/393E2120BBEE410AA8C873FD0BE32913/local_file</url>
+                                                        </Item>");
+           
+        }
+
+        public static Item MockURLShortcutItem()
+		{
+			var itm = Item.Parse(_usEasternSession,
+						@"<Item type=""Ans_Data"" typeId=""D441339CBF2644D9A231FE952C627322"" id=""6E5AA6A722B848FD91176259B64DFC67"">
+	                        <branch keyed_name=""Default"" type=""ans_Branch"">842256A605764CC19050D6847E8A90AA</branch>
+	                        <classification>Shortcut</classification>
+	                        <id keyed_name=""Test"" type=""Ans_Data"">6E5AA6A722B848FD91176259B64DFC67</id>
+	                        <is_folder>0</is_folder>
+	                        <is_latest>1</is_latest>
+	                        <keyed_name>Test</keyed_name>
+	                        <local_file is_null=""1""/>
+	                        <locked_by_id is_null=""1""/>
+	                        <major_rev>001</major_rev>
+	                        <modified_on>2024-02-09T01:28:50</modified_on>
+	                        <path>/Data/</path>
+	                        <remote_url>https://myapplications.microsoft.com/</remote_url>
+	                        <state>In Work</state>
+	                        <itemtype>D441339CBF2644D9A231FE952C627322</itemtype>
+	                        <url>Ans_Data/6E5AA6A722B848FD91176259B64DFC67</url>
+	                        <fileFolderItem>
+		                        <Item type=""File"">
+			                        <file_size>60</file_size>
+			                        <filename>Test.url</filename>
+			                        <checkedout_path/>
+			                        <url>Ans_Data/6E5AA6A722B848FD91176259B64DFC67</url>
+		                        </Item>
+	                        </fileFolderItem>
+                        </Item>");
+            FileSystemItem dataItem = FileItem.FromItem(itm.Properties.Get("fileFolderItem").AsItem());
+            itm.Properties.Set("fileFolderItem", dataItem);
+            return itm;
+        }
+
+        public static Item MockAnsDataShortcutItem()
+		{
+			var itm = Item.Parse(_usEasternSession,
+						@"<Item type=""Ans_Data"" typeId=""D441339CBF2644D9A231FE952C627322"" id=""32CB45CB445D4C95916CD2A9D29809FD"">
+	                        <branch keyed_name=""Default"" type=""ans_Branch"">842256A605764CC19050D6847E8A90AA</branch>
+	                        <classification>File/Other/Other</classification>
+	                        <id keyed_name=""SimpleTextFile.txt"" type=""Ans_Data"">32CB45CB445D4C95916CD2A9D29809FD</id>
+	                        <is_folder>0</is_folder>
+	                        <is_latest>1</is_latest>
+	                        <keyed_name>SimpleTextFile.txt</keyed_name>
+	                        <local_file keyed_name=""SimpleTextFile.txt"" type=""File"">
+		                        <Item type=""File"" typeId=""8052A558B9084D41B9F11805E464F443"" id=""163431ABE07941FD8EB7B02BE78B4050"">
+			                        <checksum>1D70935DED4A811E6E6ABB3D74A97723</checksum>
+			                        <file_size>53</file_size>
+			                        <id keyed_name=""SimpleTextFile.txt"" type=""File"">163431ABE07941FD8EB7B02BE78B4050</id>
+			                        <mimetype>text/plain</mimetype>
+		                        </Item>
+	                        </local_file>
+	                        <locked_by_id is_null=""1""/>
+	                        <major_rev>001</major_rev>
+	                        <modified_on>2024-02-08T05:11:01</modified_on>
+	                        <path>/Data/test-data-2/</path>
+	                        <remote_url is_null=""1""/>
+	                        <state>In Work</state>
+	                        <itemtype>D441339CBF2644D9A231FE952C627322</itemtype>
+	                        <url>Ans_Data/32CB45CB445D4C95916CD2A9D29809FD/local_file</url>
+	                        <fileFolderItem>
+		                        <Item type=""File"">
+			                        <file_size>53</file_size>
+			                        <filename>SimpleTextFile.txt</filename>
+			                        <checksum>1D70935DED4A811E6E6ABB3D74A97723</checksum>
+			                        <checkedout_path/>
+			                        <url>Ans_Data/32CB45CB445D4C95916CD2A9D29809FD/local_file</url>
+		                        </Item>
+	                        </fileFolderItem>
+                        </Item>");
+            FileSystemItem dataItem = FileItem.FromItem(itm.Properties.Get("fileFolderItem").AsItem());
+            itm.Properties.Set("fileFolderItem", dataItem);
+            return itm;
+        }
+
+        public static Item MockItemShortcutItem()
+		{
+			var itm = Item.Parse(_usEasternSession,
+						@"<Item type=""Ans_Data"" typeId=""D441339CBF2644D9A231FE952C627322"" id=""0D70ADAC2C3640F89BD24DF658D4D1CB"">
+	                        <branch keyed_name=""Default"" type=""ans_Branch"">842256A605764CC19050D6847E8A90AA</branch>
+	                        <classification>Shortcut</classification>
+	                        <id keyed_name=""Item Shc"" type=""Ans_Data"">0D70ADAC2C3640F89BD24DF658D4D1CB</id>
+	                        <is_folder>0</is_folder>
+	                        <is_latest>1</is_latest>
+	                        <keyed_name>Item Shc</keyed_name>
+	                        <local_file is_null=""1""/>
+	                        <locked_by_id is_null=""1""/>
+	                        <major_rev>001</major_rev>
+	                        <modified_on>2024-02-09T02:00:43</modified_on>
+	                        <path>/Data/</path>
+	                        <remote_url>http://punpduw19v02/ANSYSMinerva/?StartItem=Ans_SimulationTask:9E4FD9474A61444B8D11BDF8C9788490</remote_url>
+	                        <state>In Work</state>
+	                        <itemtype>D441339CBF2644D9A231FE952C627322</itemtype>
+	                        <url>Ans_Data/0D70ADAC2C3640F89BD24DF658D4D1CB</url>
+	                        <fileFolderItem>
+		                        <Item type=""Folder"">
+			                        <filename>#1000152</filename>
+			                        <url>Ans_Data/0D70ADAC2C3640F89BD24DF658D4D1CB</url>
+		                        </Item>
+	                        </fileFolderItem>
+                        </Item>");
+            FileSystemItem dataItem = FolderItem.FromItem(itm.Properties.Get("fileFolderItem").AsItem());
+            itm.Properties.Set("fileFolderItem", dataItem);
+            return itm;
+        }
+        #endregion
+    }
+}

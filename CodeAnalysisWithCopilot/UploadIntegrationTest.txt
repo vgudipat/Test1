@@ -1,0 +1,616 @@
+using Ansys.Minerva.IntegrationFramework.Common.Env;
+using Ansys.Minerva.IntegrationFramework.SdkImpl;
+using Ansys.Minerva.Sdk;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Data.Common;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Xunit;
+using Xunit.Abstractions;
+
+[assembly: CollectionBehavior(DisableTestParallelization = true)]
+
+namespace Ansys.Minerva.CmdTest.UploadTest
+{
+    [Collection("Serial")]
+    public class UploadIntegrationTest
+    {
+        private readonly ITestOutputHelper _output;
+
+        public UploadIntegrationTest(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+        [Theory]
+        [MemberData(nameof(UploadCases))]
+        public async Task UploadBySize(FileSize size)
+        {
+            await using (var context = new TestContext(_output, $"Upload{size}"))
+            {
+                var fileName = context.CreateLocalData(size);
+                var folderName = "_" + DateTime.UtcNow.ToString("yyMMddHHmmss");
+                var testDir = await context.CreateRemoteTestFolderAsync(folderName);
+                var res = await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory, "--output", "stream://stdout");
+                await ValidateFilesPresentInRemoteFolderAsync(context, fileName, folderName, size.ToLength());
+                //test output option
+                var connection = await context.Connect();
+                ValidateUploadCommandOutput(res.StandardOutput.ToString(), fileName, folderName, size, context, connection);
+            }
+        }
+
+        [Fact]
+        public async Task TestUploadCommandForOverwriteWithoutOverwriteOption()
+        {
+            await using (var context = new TestContext(_output, $"TestUploadCommandForOverwriteWithError"))
+            {
+                string fileName = context.CreateLocalData(new FileSize(10, BinaryPrefix.B));
+                string folderName = "_" + DateTime.UtcNow.ToString("yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                //upload file
+                await context.RunProcess("upload", "-n", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory);
+                var filePath = $"{context.TestDataDirectory}/{fileName}";
+                //modify content of the already uploaded local file and upload it again
+                ModifyExistingLocalFile(filePath);
+                try
+                {
+                    await context.RunProcess("upload", "-n", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory);
+                }
+                catch (Exception ex)
+                {
+                    Assert.Contains("destination already has files or folders named " + fileName, ex.Message, StringComparison.OrdinalIgnoreCase);
+                    Assert.True(ex.GetType() == typeof(CliWrap.Exceptions.CommandExecutionException));
+                    return;
+                }
+                Assert.True(false, "Upload command did not throw exception for overwrite with error scenario");
+            }
+        }
+
+        [Fact]
+        public async Task TestUploadCommandForBranchFromFileModification()
+        {
+            await using (var context = new TestContext(_output, $"TestUploadCommandForBranchFromFileModification"))
+            {
+                // Create a new file locally
+                string fileName = context.CreateLocalData(new FileSize(10, BinaryPrefix.B));
+
+                // Upload file to remote in session mode
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/", "-l", context.TestDataDirectory);
+                var filePath = $"{context.TestDataDirectory}/{fileName}";
+
+                // Modify content of the already uploaded local file and upload it to remote again in session
+                for (int i = 1; i < 3; i++)
+                {
+                    ModifyExistingLocalFile(filePath);
+                    await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/", "-l", context.TestDataDirectory, "-o", "Snapshot", "-c");
+                }
+
+                // Delete existing file to avoid accidental overwrite
+                File.Delete($"{context.TestDataDirectory}/{fileName}");
+
+                // Download file with version 001.002 - intermediate modified file
+                await context.RunProcess("download", "-u", context.Url.ToString(), "-r", $"/Data/{fileName}?revision=001.002", "-l", context.TestDataDirectory, "-n");
+                
+                // Read content of intermediate modified file
+                string intermediateContent = File.ReadAllText(filePath);
+
+                // Modify this version and re-upload to remote
+                ModifyExistingLocalFile(filePath);
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/", "-l", context.TestDataDirectory, "-o", "Snapshot", "-c", "--output", $"{context.TestDataDirectory}/test.json");
+                string branchedContent= File.ReadAllText(filePath);
+
+                VerifyFileContents(intermediateContent, branchedContent);
+
+                //VerifyNewBranchCreated
+                using (StreamReader r = new StreamReader($"{context.TestDataDirectory}/test.json"))
+                {
+                    string jsonString = r.ReadToEnd();
+                    VerifyNewBranchCreated(jsonString, context);
+                }
+            }
+        }
+
+        [Fact]
+        public async Task TestFilePathAndIdPathAfterBranching()
+        {
+            await using (var context = new TestContext(_output, $"TestFilePathAndIdPathAfterBranching"))
+            {
+                string fileName = context.CreateLocalData(new FileSize(10, BinaryPrefix.B));
+                // Upload file to remote in session mode
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/", "-l", context.TestDataDirectory);
+                var filePath = $"{context.TestDataDirectory}/{fileName}";
+
+                // Modify content of the already uploaded local file and upload it to remote again in session
+                for (int i = 1; i < 3; i++)
+                {
+                    ModifyExistingLocalFile(filePath);
+                    await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/", "-l", context.TestDataDirectory, "-o", "Snapshot", "-c");
+                }
+
+                // Delete existing file to avoid accidental overwrite
+                File.Delete($"{context.TestDataDirectory}/{fileName}");
+
+                // Download file with version 001.002 - intermediate modified file
+                await context.RunProcess("download", "-u", context.Url.ToString(), "-r", $"/Data/{fileName}?revision=001.002", "-l", context.TestDataDirectory, "-n");
+
+                // Modify this version and re-upload to remote
+                ModifyExistingLocalFile(filePath);
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/", "-l", context.TestDataDirectory, "-o", "Snapshot", "-c", "--output", $"{context.TestDataDirectory}/test.json");
+
+                //Assert Path and Id_path for branched file from 001.002
+                var _connection = await context.Connect();
+                //AML query for particular fileName and branch not equal to 'Default' 
+                var fileItem = (await _connection.ExecuteAsync(Query.Aml((IFormattable)$@"<Item action='get' type='ans_Data' ><keyed_name condition='in'>{fileName}</keyed_name><branch condition='ne'>842256A605764CC19050D6847E8A90AA</branch></Item>"))).AssertItem();
+                Assert.Equal($"/Data/", fileItem.Properties["path"].Value);
+                Assert.Equal($"/43199A7A8D6B45AC872FAF44AECE7155/", fileItem.Properties["id_path"].Value);
+            }
+        }
+
+        private static void VerifyNewBranchCreated(string json, TestContext context)
+        {
+            Assert.NotNull(json);
+            var cmdOutput = JsonSerializer.Deserialize<CommandOutputData>(json);
+            Assert.NotNull(cmdOutput);
+            Assert.NotNull(cmdOutput.Items);
+            foreach (var item in cmdOutput.Items)
+            {
+                Assert.NotNull(item.Remote);
+                Assert.Equal("001", item.Remote.Revision);
+                Assert.NotEqual("Default", item.Remote.Branch); // Other than default branch - admin/xxxxxx
+            }
+        }
+
+        private static void VerifyFileContents(string originalContent, string modifiedContent)
+        {
+            // Perform assertions to compare the file contents
+            Assert.NotEqual(originalContent, modifiedContent);
+        }
+
+        [Theory]
+        [InlineData("*")]
+        [InlineData("Model")]
+        [InlineData("")]
+        public async Task TestUploadCommandForVersionFoldersOption(string classification)
+        {
+            await using (var context = new TestContext(_output, "TestUploadCommandForVersionFoldersOption"))
+            {
+                string parentFolderName = Guid.NewGuid().ToString();
+                string childFolderName = Guid.NewGuid().ToString();
+                Directory.CreateDirectory(Path.Combine(context.TestDataDirectory, parentFolderName));
+                Directory.CreateDirectory(Path.Combine(context.TestDataDirectory, parentFolderName, childFolderName));
+                string folderName = "_" + DateTime.UtcNow.ToString("yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                //upload file
+                await context.RunProcess("upload", "-n", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory, "--version-folders", classification);
+                var _connection = await context.Connect();
+                var parentFolder = (await _connection.ExecuteAsync(Query.Aml((IFormattable)$@"<Item action='get' type='ans_Data' select='classification'><keyed_name condition='in'>{parentFolderName}</keyed_name></Item>"))).AssertItem();
+                Assert.Equal("Model", parentFolder.Properties["classification"].Value);
+                var childFolder = (await _connection.ExecuteAsync(Query.Aml((IFormattable)$@"<Item action='get' type='ans_Data' select='classification'><keyed_name condition='in'>{childFolderName}</keyed_name></Item>"))).AssertItem();
+                Assert.Equal("Model", childFolder.Properties["classification"].Value);
+            }
+        }
+
+        [Fact]
+        public async Task TestSTKUsecase1()
+        {
+            await using (var context = new TestContext(_output, "TestSTKUsecase1"))
+            {
+                string parentFolderName = Guid.NewGuid().ToString();
+                string parentFolderPath = Path.Combine(context.TestDataDirectory, parentFolderName);
+                Directory.CreateDirectory(parentFolderPath);
+
+                // Create the file in the Scenario1 folder
+                string fileName = context.CreateLocalData(new FileSize(10, BinaryPrefix.B), Path.Combine(parentFolderName, "sc.txt"));
+                string filePath = Path.Combine(parentFolderPath, "sc.txt");
+
+                // Create a folder on Minerva
+                string folderName = "_" + DateTime.UtcNow.ToString("yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+
+                // Upload the Scenario1 folder to Minerva
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory, "--version-folders", "Model", "-o", "Snapshot", "-c");
+
+                var _connection = await context.Connect();
+
+                // Call the method with 1 expected revision
+                await VerifyFolderAndVersionsAsync(_connection, parentFolderName, new HashSet<string> { "001" });
+
+                //modifying sc.txt equivalent to adding new STK object
+
+                ModifyExistingLocalFile(filePath);
+
+                // Upload the updated Scenario1 folder with modified file to Minerva
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory, "--version-folders", "Model", "-o", "Snapshot", "-c");
+
+                // Call the method with 3 expected revisions
+                await VerifyFolderAndVersionsAsync(_connection, parentFolderName, new HashSet<string> { "001.001", "001.002", "001" });
+
+            }
+        }
+
+        private async Task VerifyFolderAndVersionsAsync(HttpConnection _connection, string parentFolderName, HashSet<string> expectedRevisions)
+        {
+            IEnumerable<Item> parentFolder;
+            parentFolder = (await _connection.ExecuteAsync(Query.Aml((IFormattable)$@"<Item action='get' type='ans_Data' select='classification'><keyed_name condition='in'>{parentFolderName}</keyed_name></Item>"))).AssertItems();
+
+            // Ensure that the folder classification is "Model"
+            Assert.True(parentFolder.All(x => string.Equals(x.Properties.Get("classification").AsString(), "Model")));
+
+            // Get the folderId from the first item
+            string folderId = parentFolder.FirstOrDefault()?.Properties.Get("id").AsString();
+            if (string.IsNullOrEmpty(folderId))
+            {
+                throw new InvalidOperationException("Folder ID not found.");
+            }
+
+            // Retrieve all versions
+            var allVersions = (await _connection.ExecuteAsync(Query.Aml((IFormattable)$@"<Item action='ans_Data_GetAllVersions' type='ans_Data' select='major_rev' id='{folderId}'></Item>"))).AssertItems();
+
+            // Get the actual major revisions from the items
+            var actualRevisions = allVersions.Select(x => x.Properties.Get("major_rev").AsString()).ToHashSet();
+
+            // Ensure that the actual revisions contain all the expected revisions
+            Assert.True(expectedRevisions.IsSubsetOf(actualRevisions), "Not all expected major revisions are present.");
+        }
+
+
+
+
+        [InlineData(OverwriteMode.Overwrite)]
+        [InlineData(OverwriteMode.Snapshot)]
+        public async Task TestUploadCommandWithCloseSession(OverwriteMode overwriteMode)
+        {
+            await using (var context = new TestContext(_output, "TestUploadCommandWithCloseSession"))
+            {
+                var _fileName = context.CreateLocalData(new FileSize(10, BinaryPrefix.B));
+                string _folderName = "_" + DateTime.UtcNow.ToString("yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(_folderName);
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/{_folderName}/", "-l", context.TestDataDirectory);
+                var filePath = context.TestDataDirectory + "/" + _fileName;
+                var oldFileSize = new FileInfo(filePath).Length.ToString();
+                ModifyExistingLocalFile(filePath);
+                var newFileSize = new FileInfo(filePath).Length.ToString();
+                // Upload modified file with close-session
+
+                var commandArgs = new List<string>()
+                {
+                    "upload", "-c", "-u", context.Url.ToString(), "-r", $"/Data/{_folderName}/", "-l", context.TestDataDirectory
+                };
+
+                //Snapshot is default case, so we are testing it without passing snapshot overwrite mode.
+                if (overwriteMode != OverwriteMode.Snapshot)
+                {
+                    commandArgs.Add("-o");
+                    commandArgs.Add(overwriteMode.ToString());
+                }
+
+                await context.RunProcess(commandArgs.ToArray());
+                // Check new file size and version 001
+                var res1 = await context.RunProcess("select-items", "-u", context.Url.ToString(),
+                                                    "-r", $"/Data/{_folderName}/{_fileName}?revision=001",
+                                                    "--output", "stream://stdout",
+                                                    "--mode", "SelectFile");
+
+                VerifyFileVersionAndSize(res1.StandardOutput.ToString(), 1, "001", newFileSize);
+
+                // Check old file size and version 001.001
+                var res2 = await context.RunProcess("select-items", "-u", context.Url.ToString(),
+                                                    "-r", $"/Data/{_folderName}/{_fileName}?revision=001.001",
+                                                    "--output", "stream://stdout",
+                                                    "--mode", "SelectFile");
+
+
+                VerifyFileVersionAndSize(res2.StandardOutput.ToString(), 1, "001.001", overwriteMode.Equals(OverwriteMode.Overwrite) ? newFileSize : oldFileSize);
+
+                if(overwriteMode == OverwriteMode.Snapshot)
+                {
+                    var res3 = await context.RunProcess("select-items", "-u", context.Url.ToString(),
+                                                    "-r", $"/Data/{_folderName}/{_fileName}?revision=001.002",
+                                                    "--output", "stream://stdout",
+                                                    "--mode", "SelectFile");
+
+                    VerifyFileVersionAndSize(res3.StandardOutput.ToString(), 1, "001.002", newFileSize);
+                }
+            }
+        }
+
+        private void VerifyFileVersionAndSize(string result, int itemsCount, string revisionNumber, string fileSize)
+        {
+            var cmdOutput = JsonSerializer.Deserialize<CommandOutputData>(result);
+            Assert.NotNull(cmdOutput);
+            Assert.NotNull(cmdOutput.Items);
+            Assert.Equal(itemsCount, cmdOutput.Items.Count);
+            foreach (var item in cmdOutput.Items)
+            {
+                Assert.NotNull(item.Remote);
+                Assert.Equal(revisionNumber, item.Remote.Revision);
+                if (!item.IsDirectory)
+                    Assert.Equal(fileSize, item.Remote.Size);
+            }
+        }
+
+        [Fact]
+        public async Task TestUploadMultipleFilesCommandWithGlobOption()
+        {
+            await using (var context = new TestContext(_output, "TestUploadMultipleFilesCommandWithGlobOption"))
+            {
+                string scsFileName = "3D_Image_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".scs";
+                string thumbnailFileName = "thubmnail_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".png";
+                string textFileName = "file1_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".txt";
+                string datFileName = "file2_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".dat";
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), scsFileName);
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), thumbnailFileName);
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), textFileName);
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), datFileName);
+                string folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                await context.RunProcess("upload", "-n", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory, "-g", "*.txt", "*.dat");
+                FileItem textFile = await GetFilePresentInRemoteFolderAsync(context, textFileName, folderName);
+                Assert.NotNull(textFile);
+                FileItem datFile = await GetFilePresentInRemoteFolderAsync(context, datFileName, folderName);
+                Assert.NotNull(datFile);
+                await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                {
+                    await GetFilePresentInRemoteFolderAsync(context, scsFileName, folderName);
+                });
+                await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                {
+                    await GetFilePresentInRemoteFolderAsync(context, thumbnailFileName, folderName);
+                });
+            }
+        }
+
+        [Fact]
+        public async Task TestUploadWithMinervaIgnore()
+        {
+            await using (var context = new TestContext(_output, "TestUploadWithMinervaIgnore"))
+            {
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files with \"file\" in their name",
+                    "*file*"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+                string scsFileName = "3D_Image_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".scs";
+                string thumbnailFileName = "thubmnail_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".png";
+                string textFileName = "file1_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".txt";
+                string datFileName = "file2_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".dat";
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), scsFileName);
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), thumbnailFileName);
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), textFileName);
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), datFileName);
+                string folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                await context.RunProcess("upload", "-n", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory, "-g", "*.txt", "*.dat", "*.png");
+                FileItem pngFile = await GetFilePresentInRemoteFolderAsync(context, thumbnailFileName, folderName);
+                Assert.NotNull(pngFile);
+                await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                {
+                    await GetFilePresentInRemoteFolderAsync(context, scsFileName, folderName);
+                });
+                await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                {
+                    await GetFilePresentInRemoteFolderAsync(context, textFileName, folderName);
+                });
+                await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                {
+                    await GetFilePresentInRemoteFolderAsync(context, datFileName, folderName);
+                });
+            }
+        }
+
+        [Fact]
+        public async Task TestUploadWithMinervaIgnoreOverride()
+        {
+            await using (var context = new TestContext(_output, "TestUploadWithMinervaIgnore"))
+            {
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files with \"file\" in their name",
+                    "*file*"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+                string scsFileName = "3D_Image_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".scs";
+                string thumbnailFileName = "thubmnail_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".png";
+                string textFileName = "file1_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".txt";
+                string datFileName = "file2_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".dat";
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), scsFileName);
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), thumbnailFileName);
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), textFileName);
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), datFileName);
+                string folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                await context.RunProcess("upload", "-n", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory, 
+                    "-g", "*.txt", "*.dat", "*.png", "--override-minervaignore", "**/*");
+                FileItem textFile = await GetFilePresentInRemoteFolderAsync(context, textFileName, folderName);
+                Assert.NotNull(textFile);
+                FileItem datFile = await GetFilePresentInRemoteFolderAsync(context, datFileName, folderName);
+                Assert.NotNull(datFile);
+                FileItem pngFile = await GetFilePresentInRemoteFolderAsync(context, thumbnailFileName, folderName);
+                Assert.NotNull(pngFile);
+                await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                {
+                    await GetFilePresentInRemoteFolderAsync(context, scsFileName, folderName);
+                });
+            }
+        }
+
+        [Fact]
+        public async Task TestUploadWithMinervaIgnoreOverride2()
+        {
+            await using (var context = new TestContext(_output, "TestUploadWithMinervaIgnore"))
+            {
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files with \"file\" in their name",
+                    "*file*"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+                string scsFileName = "3D_Image_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".scs";
+                string thumbnailFileName = "thubmnail_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".png";
+                string textFileName = "file1_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".txt";
+                string datFileName = "file2_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".dat";
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), scsFileName);
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), thumbnailFileName);
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), textFileName);
+                context.CreateLocalData(new FileSize(10, BinaryPrefix.B), datFileName);
+                string folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                await context.RunProcess("upload", "-n", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory,
+                    "-g", "*.txt", "*.dat", "*.png", "--override-minervaignore", "**/*.txt");
+                FileItem textFile = await GetFilePresentInRemoteFolderAsync(context, textFileName, folderName);
+                Assert.NotNull(textFile);
+                FileItem pngFile = await GetFilePresentInRemoteFolderAsync(context, thumbnailFileName, folderName);
+                Assert.NotNull(pngFile);
+                await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                {
+                    await GetFilePresentInRemoteFolderAsync(context, scsFileName, folderName);
+                });
+                await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                {
+                    await GetFilePresentInRemoteFolderAsync(context, datFileName, folderName);
+                });
+            }
+        }
+
+        [Fact]
+        public async Task TestUploadCommandForOverwrite()
+        {
+            await using (var context = new TestContext(_output, $"TestUploadCommandForOverwrite"))
+            {
+                string fileName = context.CreateLocalData(new FileSize(10, BinaryPrefix.B));
+                var filePath = $"{context.TestDataDirectory}/{fileName}";
+                //get file info for newly created local file
+                FileInfo localFileItm = new FileInfo(filePath);
+                string folderName = "_" + DateTime.UtcNow.ToString("yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                //upload file
+                await context.RunProcess("upload", "-n", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory);
+                //Get file item of uploaded file
+                FileItem remoteFileItm = await GetFilePresentInRemoteFolderAsync(context, fileName, folderName);
+
+                Assert.Equal(localFileItm.Length, remoteFileItm.Length);
+
+                //modify content of the already uploaded local file and upload it again with overwrite command
+                ModifyExistingLocalFile(filePath);
+                await context.RunProcess("upload", "-n", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory, "-o Overwrite");
+
+                //Get file info for modified local file
+                FileInfo localFileItmAfterOverwrite = new FileInfo(filePath);
+                Assert.NotEqual(localFileItm.Length, localFileItmAfterOverwrite.Length);
+
+                //Get file item for overridden file
+                FileItem remoteFileItmAfterOverwrite = await GetFilePresentInRemoteFolderAsync(context, fileName, folderName);
+
+                Assert.Equal(localFileItmAfterOverwrite.Length, remoteFileItmAfterOverwrite.Length);
+
+                Assert.NotEqual(remoteFileItm.Length, remoteFileItmAfterOverwrite.Length);
+                Assert.NotEqual(remoteFileItm.ModifiedOn, remoteFileItmAfterOverwrite.ModifiedOn);
+                return;
+            }
+        }
+
+        private async Task ValidateFilesPresentInRemoteFolderAsync(TestContext context, string fileName, string folderName, long fileSize)
+        {
+            var match = await GetFilePresentInRemoteFolderAsync(context, fileName, folderName);
+
+            Assert.Equal(fileSize, match.Length);
+            Assert.Equal(fileName, match.Name);
+        }
+        private async Task<FileItem> GetFilePresentInRemoteFolderAsync(TestContext context, string fileName, string folderName)
+        {
+            var validateFolderView = new FolderViewModel(await context.Connect());
+            await validateFolderView.TryNavigateToDefaultAsync();
+            var path = FileSystemFilter.FromGlobs(folderName);
+            var matches = await validateFolderView.GetFileSystemItemsAsync(path);
+            bool result = await validateFolderView.TryNavigateToAsync(matches.Single());
+
+            Assert.True(result);
+
+            path = FileSystemFilter.FromGlobs(fileName);
+            return (await validateFolderView.GetFileSystemItemsAsync(path)).OfType<FileItem>().Single();
+        }
+
+        private static void ValidateUploadCommandOutput(string json, string fileName, string folderName, FileSize size, TestContext context, HttpConnection connection)
+        {
+            Assert.NotNull(json);
+            var cmdOutput = JsonSerializer.Deserialize<CommandOutputData>(json);
+            Assert.NotNull(cmdOutput);
+            Assert.NotNull(cmdOutput.Items);
+            Assert.Single(cmdOutput.Items);
+            var item = cmdOutput.Items[0];
+            Assert.False(item.IsDirectory);
+            Assert.NotNull(item.Remote);
+            Assert.Equal(fileName, item.Remote.Name);
+            Assert.Matches("^Ans_Data/[a-zA-z0-9]{32}", item.Remote.Locator);
+            Assert.Equal("001", item.Remote.Revision);
+            Assert.Equal("Default", item.Remote.Branch);
+            Assert.Equal("text/plain", item.Remote.MimeType);
+            Assert.NotNull(item.Remote.Size);
+            var bytesToSize = MinervaHelper.BytesToSize(Convert.ToInt64(item.Remote.Size.ToString()), 0);
+            Assert.Equal($"{size.Size} {size.Prefix.ToString().ToLowerInvariant()}", bytesToSize.ToLowerInvariant());
+            Assert.Matches("[a-zA-Z0-9]{0,32}", item.Remote.Checksum);
+            Assert.Equal($"/Data/{folderName}/{fileName}", item.Remote.Path);
+            Assert.True(item.Remote.IsLatest);
+            Assert.Equal("In Work", item.Remote.LifeCycleState);
+            Assert.NotNull(item.Remote.LockedById);
+            Assert.Equal(ClaimStatus.NotClaimed.ToString(), item.Remote.LockedById.Status);
+            Assert.NotNull(item.Local);
+            Assert.Equal(fileName, item.Local.Path);
+            Assert.Equal(PathStatusType.NoChange.ToString(), item.Local.Status);
+            Assert.False(item.Local.Staged);
+            Utils.VerifyGeneralRemoteCommandOutput(cmdOutput, Path.GetFullPath(context.TestDataDirectory), connection);
+        }
+
+        public static IEnumerable<object[]> UploadCases
+        {
+            get
+            {
+                var JsonFilePath = Path.Combine(Environment.CurrentDirectory, "FileUploadTestConfig.json");
+
+                List<FileConfigInfo>? FileConfig;
+                using (var reader = new StreamReader(JsonFilePath))
+                {
+                    var json = reader.ReadToEnd();
+                    FileConfig = JsonSerializer.Deserialize<List<FileConfigInfo>>(json);
+                }
+                var sizes = new HashSet<FileSize>()
+                {
+                    new FileSize(0, BinaryPrefix.B),
+                    new FileSize(1, BinaryPrefix.kB),
+                    new FileSize(100, BinaryPrefix.kB),
+                    new FileSize(1, BinaryPrefix.MB),
+                    new FileSize(1, BinaryPrefix.GB)
+                };
+
+                foreach (var item in FileConfig!)
+                {
+                    sizes.Add(new FileSize(item.size, Enum.Parse<BinaryPrefix>(item.unit ?? "B", true)));
+                }
+
+                return sizes.Select(s => new object[] { s });
+            }
+        }
+
+        private void ModifyExistingLocalFile(string FilePath)
+        {
+            FileStream fs = new FileStream(FilePath, FileMode.Open, FileAccess.ReadWrite);
+            fs.Seek(0, SeekOrigin.End);
+            StreamWriter w = new StreamWriter(fs);
+            w.WriteLine("Modified Content!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            w.WriteLine("Modified Content!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            w.Close();
+            fs.Close();
+        }
+
+        private class FileConfigInfo
+        {
+            public int size;
+            public string? unit;
+        }
+    }
+}

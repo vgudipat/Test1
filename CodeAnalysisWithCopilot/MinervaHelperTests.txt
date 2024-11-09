@@ -1,0 +1,461 @@
+﻿using Ansys.Minerva.IntegrationFramework.Common.Commands;
+using Ansys.Minerva.IntegrationFramework.SdkImpl;
+using Ansys.Minerva.Sdk;
+using Moq;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Xunit;
+using Xunit.Abstractions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Win32;
+using System.Runtime.InteropServices;
+using Ansys.Minerva.IntegrationFramework.Common;
+
+namespace Ansys.Minerva.CmdTest.SdkImplTests
+{
+    public class MinervaHelperTests
+    {
+        private HttpConnection _connection;
+        private readonly ITestOutputHelper _output;
+        public MinervaHelperTests(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+        [Theory]
+        [InlineData("2023 R2")]
+        [InlineData("2023 R3")]
+        [InlineData("2022 R1")]
+        [InlineData("2024 R1.1")]
+        public async void IsMinervaVersionSupported(string supportedMinervaVersion)
+        {
+            await using (var context = new TestContext(_output, $"{nameof(IsMinervaVersionSupported)}{supportedMinervaVersion}"))
+            {
+                _connection = await context.Connect();
+                bool actualResult = false;
+                //call the function and check it should not throw any exceptions
+                try
+                {
+                    actualResult = await MinervaHelper.IsMinervaVersionSupported(_connection, supportedMinervaVersion);
+                }
+                catch (Exception ex)
+                {
+                    Assert.True(false, "IsMinervaVersionSupported function throws the exception: " + ex.Message);
+                }
+
+                //Get the current minerva version to verify it with supported minerva versions
+                var curMinervaVersionItm = (await _connection.ExecuteAsync(Query.Aml("<Item type='Variable' action='get' select='name,value'><name condition ='like'>ans_Version</name></Item>"))).AssertNoError().AssertItem();
+                Assert.NotNull(curMinervaVersionItm);
+                var currentMinervaVersion = (string)curMinervaVersionItm.Properties["value"];
+                Assert.NotNull(currentMinervaVersion);
+
+                var expectedResult = decimal.Parse(currentMinervaVersion.Replace(" R", "0")) >= decimal.Parse(supportedMinervaVersion.Replace(" R", "0"));
+
+                Assert.Equal(expectedResult, actualResult);
+            }
+
+        }
+
+        [Fact]
+        public async void TryCheckIfVirtualItemContainer()
+        {
+            await using (var context = new TestContext(_output, nameof(TryCheckIfVirtualItemContainer)))
+            {
+                try
+                {
+                    _connection = await context.Connect();
+                    Assert.NotNull(_connection);
+                    var folderName = "TryCheckIfVirtualItemContainerTest_" + DateTime.UtcNow.ToString("yyMMddHHmmss");
+                    var folder = await context.CreateRemoteTestFolderAsync(folderName);
+                    Assert.Equal(folderName, folder.Name);
+                    //create a dictionary with key as containers and value as expected result
+                    IDictionary<string, bool> containersDict = new Dictionary<string, bool>();
+
+                    containersDict.Add("Ans_Data/" + folder.Id, false); // expected result is false as it contains type as Ans_Data
+
+                    var task = await context.CreateTask(_connection);
+                    containersDict.Add("Ans_SimulationTask/" + task.Id, true); //expected result is true as it containes type other than Ans_data
+                    containersDict.Add("Ans_SimulationTask/" + task.Id + "/ans_SimTask_Input", false); //expected result is false as this relationship contains Ans_data item
+
+                    //form a containerLocator from container string and test the function
+                    foreach (KeyValuePair<string, bool> kvp in containersDict)
+                    {
+                        ContainerLocator containerLocator = new ContainerLocator(kvp.Key);
+                        var actualResult = MinervaHelper.TryCheckIfVirtualItemContainer(_connection, containerLocator, out Item query);
+                        Assert.Equal(kvp.Value, actualResult);
+                    }
+
+                }
+                catch (Exception ex)
+                {
+                    Assert.True(false, "exception is thrown: " + ex.Message);
+                }
+            }
+
+        }
+
+        [Theory]
+        [MemberData(nameof(remoteCases))]
+        public async void TryGetContainerLocator(string remote)
+        {
+            await using (var context = new TestContext(_output, $"{nameof(TryGetContainerLocator)}{remote}"))
+            {
+                _connection = await context.Connect();
+                Assert.NotNull(_connection);
+                MinervaHelper helper = new MinervaHelper(_connection);
+                var expectedContainerLocator = new ContainerLocator(remote);
+                var expectedResult = !expectedContainerLocator.IsEmpty ? true : false;
+
+                var actualResult = helper.TryGetContainerLocator(remote, out ContainerLocator actualContainerLocator);
+
+                Assert.Equal(expectedResult, actualResult);
+                Assert.Equal(expectedContainerLocator, actualContainerLocator);
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(RemoteStartCases))]
+        public async Task GetRemoteStartUrl(string remoteStart)
+        {
+            await using (var context = new TestContext(_output, $"RemoteStartUrl{remoteStart}"))
+            {
+                FolderItem? remoteFolder = null;
+                try
+                {
+                    _connection = await context.Connect();
+                    var minervaHelper = new MinervaHelper(_connection);
+
+                    var path = remoteStart;
+                    if (path.StartsWith("/"))
+                    {
+                        path = path.Substring(1);
+                    }
+
+                    if (path.EndsWith("/"))
+                    {
+                        path = path.Substring(0, path.Length - 1);
+                    }
+
+                    var subPath = path.Split("/");
+
+                    if (remoteStart.StartsWith("/") && subPath.Length >= 2)
+                    {
+                        remoteFolder = await context.CreateRemoteTestFolderAsync(subPath[1]);
+                    }
+
+                    var remoteStartUrl = await minervaHelper.GetRemoteStartUrl(remoteStart);
+
+                    //Remote Start URL validation
+                    if (remoteStart.StartsWith("/")) // Case for Remote friendly paths
+                    {
+                        if (subPath.Length == 1) // Case for /Data, /Data/
+                        {
+
+                            IFileSystemItem rootFolder;
+                            var rootEntries = await new FolderViewModel(_connection).GetFileSystemItemsAsync(FileSystemFilter.OneLevel);
+
+                            rootFolder = rootEntries.Single(i => string.Equals(i.Name, subPath[0], StringComparison.OrdinalIgnoreCase));
+
+                            Assert.True(rootFolder.Container.TryGetId(out var type, out var id));
+                            Assert.Equal($"{type}/{id}", remoteStartUrl);
+
+                        }
+                        else if (subPath.Length == 2) // Case for /Data/TestFolder, /Data/TestFolder/ 
+                        {
+                            Assert.NotNull(remoteFolder);
+                            Assert.True(remoteFolder.Container.TryGetId(out var type, out var id));
+                            Assert.Equal($"{type}/{id}", remoteStartUrl);
+                        }
+                        else if (subPath.Length == 3) // // Case for /Data/TestFolder/Test.txt, /Data/TestFolder/Test.txt/ (where test.txt is not present on server)
+                        {
+                            Assert.NotNull(remoteFolder);
+                            Assert.True(remoteFolder.Container.TryGetId(out var type, out var id));
+                            Assert.Equal($"{type}/{id}|{subPath[2]}", remoteStartUrl);
+                        }
+                    }
+                    else if (remoteStart == string.Empty)
+                    {
+                        Assert.Equal(string.Empty, remoteStartUrl);
+                    }
+
+                }
+                catch (Exception ex)
+                {
+                    Assert.True(false, "exception is thrown: " + ex.Message);
+                }
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(RemoteStartCases))]
+        public async void TryGetContainerLocator_FriendlyRemote(string friendlyRemote)
+        {
+            await using (var context = new TestContext(_output, $"{nameof(TryGetContainerLocator_FriendlyRemote)}{friendlyRemote}"))
+            {
+                _connection = await context.Connect();
+                Assert.NotNull(_connection);
+                MinervaHelper helper = new MinervaHelper(_connection);
+                FolderItem? remoteFolder = null;
+                try
+                {
+                    var path = friendlyRemote;
+                    if (path.StartsWith("/"))
+                    {
+                        path = path.Substring(1);
+                    }
+
+                    if (path.EndsWith("/"))
+                    {
+                        path = path.Substring(0, path.Length - 1);
+                    }
+
+                    var subPath = path.Split("/");
+
+                    if (friendlyRemote.StartsWith("/") && subPath.Length >= 2)
+                    {
+
+                        remoteFolder = await context.CreateRemoteTestFolderAsync(subPath[1]);
+                        Assert.NotNull(remoteFolder);
+                        if (subPath.Length >= 3)
+                        {
+                            var folderView = new FolderViewModel(_connection);
+                            await folderView.TryNavigateToDefaultAsync();
+                            await folderView.TryNavigateToAsync(remoteFolder);
+                            var fileItem = context.CreateRemoteData(new FileSize(10, BinaryPrefix.B), subPath[2]);
+                            await folderView.UploadFilesAsync(new[] { fileItem });
+                        }
+                    }
+
+                    var actualResult = helper.TryGetContainerLocator(friendlyRemote, out ContainerLocator actualContainerLocator);
+
+                    //Validation of actualResult and containerLocator
+                    if (friendlyRemote.StartsWith("/"))
+                    {
+                        if (subPath.Length == 1) // Case for /Data, /Data/
+                        {
+
+                            IFileSystemItem rootFolder;
+                            var rootEntries = await new FolderViewModel(_connection).GetFileSystemItemsAsync(FileSystemFilter.OneLevel);
+                            rootFolder = rootEntries.Single(i => string.Equals(i.Name, subPath[0], StringComparison.OrdinalIgnoreCase));
+                            Assert.True(actualResult);
+                            Assert.Equal(rootFolder.Container, actualContainerLocator);
+
+                        }
+                        else if (subPath.Length == 2) // Case for /Data/TestFolder, /Data/TestFolder/ 
+                        {
+                            Assert.True(actualResult);
+                            Assert.False(actualContainerLocator.IsEmpty);
+                            Assert.Equal(remoteFolder.Container, actualContainerLocator);
+                        }
+                        else if (subPath.Length == 3) // // Case for /Data/TestFolder/Test.txt, /Data/TestFolder/Test.txt/ (where test.txt is not present on server)
+                        {
+                            Assert.True(actualResult);
+                            Assert.False(actualContainerLocator.IsEmpty);
+                            Assert.True(actualContainerLocator.TryGetId(out var type, out var id));
+                            Assert.NotNull(type);
+                            Assert.NotNull(id);
+                        }
+                    }
+                    else if (friendlyRemote == string.Empty)
+                    {
+                        Assert.False(actualResult);
+                        Assert.True(actualContainerLocator.IsEmpty);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Assert.True(false, "Exception is thrown: " + ex.Message);
+                    return;
+                }
+            }
+
+        }
+
+        //Unit test for 'GetOverwriteCallback' method.
+        [Theory]
+        [MemberData(nameof(OverwriteBehaviorCases))]
+        public void GetOverwriteCallback(OverwriteBehavior overwriteOption)
+        {
+            var actualResult = MinervaHelper.GetOverwriteCallback(overwriteOption);
+            Assert.NotNull(actualResult.Method);
+        }
+
+        [Theory]
+        [MemberData(nameof(remoteCases))]
+        public void TryCheckIfFlattenedContainer(string remote)
+        {
+            //Example of remote : Ans_SimulationTask/DA554AFDBB9A4451BCFFFCEE0B2005BC/ans_SimTask_Input?path=NewFolder
+
+            var expectedResult = remote.Contains("path=");
+            UriBuilder expectedLocatorUrl = new UriBuilder(remote);
+            string expectedQueryString = expectedLocatorUrl.Query;
+
+            ContainerLocator locator = new ContainerLocator(remote);
+            var actualResult = MinervaHelper.TryCheckIfFlattenedContainer(locator, out string queryString);
+
+            Assert.Equal(expectedResult, actualResult);
+            Assert.Equal(expectedQueryString, queryString);
+        }
+
+        [Theory]
+        [MemberData(nameof(dataViewSelection))]
+        public async void TryGetContainerIDs(JsonElement selectedItems)
+        {
+            await using (var context = new TestContext(_output, $"{nameof(TryGetContainerIDs)}{selectedItems}"))
+            {
+                try
+                {
+                    _connection = await context.Connect();
+                    var minervaHelper = new MinervaHelper(_connection);
+                    var actualContainerIDs = minervaHelper.TryGetContainerIDs(selectedItems);
+
+                    IEnumerable<string>? expectedContainerIDs = new List<string>();
+                    expectedContainerIDs = selectedItems.EnumerateArray().Select(i =>
+                    {
+                        if (i.TryGetProperty("url", out var url))
+                        {
+                            return url.GetString() ?? string.Empty;
+                        }
+                        return string.Empty;
+                    });
+
+                    Assert.Equal(expectedContainerIDs, actualContainerIDs);
+                }
+                catch (Exception ex)
+                {
+                    Assert.True(false, "Exception is thrown: " + ex.Message);
+                }
+            }
+        }
+
+        public static IEnumerable<object[]> remoteCases
+        {
+            get
+            {
+                var remoteCases = new List<string>();
+                remoteCases.Add($"Ans_Data/{Guid.NewGuid().ToArasId()}");
+                remoteCases.Add($"Ans_Project/{Guid.NewGuid().ToArasId()}");
+                remoteCases.Add($"Ans_SimulationTask/{Guid.NewGuid().ToArasId()}/ans_SimTask_Input");
+                remoteCases.Add($"Ans_SimulationTask/{Guid.NewGuid().ToArasId()}/ans_SimTask_Input?path=AnsData_Path");
+                return remoteCases.Select(s => new string[] { s });
+            }
+        }
+
+        public static IEnumerable<object[]> RemoteStartCases
+        {
+            get
+            {
+                var remoteStartUrlCases = new List<string>();
+                remoteStartUrlCases.Add("");
+                remoteStartUrlCases.Add("/Data");
+                remoteStartUrlCases.Add("/Data/");
+                remoteStartUrlCases.Add($"/Data/RemoteUrlFolder_{DateTime.UtcNow.ToString("yyMMddHHmmss")}");
+                remoteStartUrlCases.Add($"/Data/RemoteUrlFolder_{DateTime.UtcNow.ToString("yyMMddHHmmss")}/");
+                remoteStartUrlCases.Add($"/Data/RemoteUrlFolder_{DateTime.UtcNow.ToString("yyMMddHHmmss")}/TestFile.txt");
+                remoteStartUrlCases.Add($"/Data/RemoteUrlFolder_{DateTime.UtcNow.ToString("yyMMddHHmmss")}/TestFile.txt/");
+                return remoteStartUrlCases.Select(s => new string[] { s });
+            }
+        }
+
+        public static IEnumerable<object[]> OverwriteBehaviorCases
+        {
+            get
+            {
+                var cases = new List<OverwriteBehavior>() {
+                    OverwriteBehavior.Error,
+                    OverwriteBehavior.Overwrite,
+                    OverwriteBehavior.Append,
+                    OverwriteBehavior.Ignore
+            };
+                return cases.Select(s => new object[] { s });
+            }
+        }
+
+        public static IEnumerable<object[]> dataViewSelection
+        {
+            get
+            {
+                string singleFolderSelection = @"[{ ""archive_type"":null,""branch"":{ ""id"":""842256A605764CC19050D6847E8A90AA"",""keyed_name"":""Default""},""classification"":""Folder"",""keyed_name"":""Bug_Test"",""config_id"":""5EBD21D402A64564B1F2E5807B5559FA"",""file_size"":null,""icon"":"".. / Images / ansys / folder.svg"",""id"":""5EBD21D402A64564B1F2E5807B5559FA"",""id_path"":"" / 43199A7A8D6B45AC872FAF44AECE7155 / "",""is_folder"":true,""is_latest"":true,""local_file"":null,""locked_by_id"":null,""major_rev"":""001"",""modified_by_id"":{ ""id"":""30B991F927274FA3829655F50C99472E"",""keyed_name"":""Ansys Admin""},""modified_on"":""2023 - 04 - 04T02: 50:18"",""remote_url"":null,""state"":""Uncontrolled"",""state_image"":"".. / Images / ansys / State_Uncontrolled.svg"",""name"":""Bug_Test"",""itemtype"":{ ""id"":""D441339CBF2644D9A231FE952C627322"",""name"":""Ans_Data""},""folder_count"":""1"",""url"":""Ans_Data / 5EBD21D402A64564B1F2E5807B5559FA"",""rel.behavior"":""float"",""rel.keyed_name"":""405148699C6E4AB180D062AA738028CD"",""rel.link_type"":null,""rel.sort_order"":70,""rel.itemtype"":{ ""id"":""610787F9AD784CA9BCA12284A96E2117"",""name"":""Ans_DataChild""},""@relationship_id"":""405148699C6E4AB180D062AA738028CD"",""key"":""405148699C6E4AB180D062AA738028CD"",""is_favorite"":true}]";
+                string twoFolderSelection = @"[{ ""archive_type"":null,""branch"":{ ""id"":""842256A605764CC19050D6847E8A90AA"",""keyed_name"":""Default""},""classification"":""Folder"",""keyed_name"":""Bug_Test"",""config_id"":""5EBD21D402A64564B1F2E5807B5559FA"",""file_size"":null,""icon"":"".. / Images / ansys / folder.svg"",""id"":""5EBD21D402A64564B1F2E5807B5559FA"",""id_path"":"" / 43199A7A8D6B45AC872FAF44AECE7155 / "",""is_folder"":true,""is_latest"":true,""local_file"":null,""locked_by_id"":null,""major_rev"":""001"",""modified_by_id"":{ ""id"":""30B991F927274FA3829655F50C99472E"",""keyed_name"":""Ansys Admin""},""modified_on"":""2023 - 04 - 04T02: 50:18"",""remote_url"":null,""state"":""Uncontrolled"",""state_image"":"".. / Images / ansys / State_Uncontrolled.svg"",""name"":""Bug_Test"",""itemtype"":{ ""id"":""D441339CBF2644D9A231FE952C627322"",""name"":""Ans_Data""},""folder_count"":""1"",""url"":""Ans_Data / 5EBD21D402A64564B1F2E5807B5559FA"",""rel.behavior"":""float"",""rel.keyed_name"":""405148699C6E4AB180D062AA738028CD"",""rel.link_type"":null,""rel.sort_order"":70,""rel.itemtype"":{ ""id"":""610787F9AD784CA9BCA12284A96E2117"",""name"":""Ans_DataChild""},""@relationship_id"":""405148699C6E4AB180D062AA738028CD"",""key"":""405148699C6E4AB180D062AA738028CD"",""is_favorite"":true},{ ""archive_type"":null,""branch"":{ ""id"":""842256A605764CC19050D6847E8A90AA"",""keyed_name"":""Default""},""classification"":""Folder"",""keyed_name"":""Hello"",""config_id"":""E919A6371BEB4DAE93447CF79C57BB0E"",""file_size"":null,""icon"":"".. / Images / ansys / folder.svg"",""id"":""E919A6371BEB4DAE93447CF79C57BB0E"",""id_path"":"" / 43199A7A8D6B45AC872FAF44AECE7155 / "",""is_folder"":true,""is_latest"":true,""local_file"":null,""locked_by_id"":null,""major_rev"":""001"",""modified_by_id"":{ ""id"":""30B991F927274FA3829655F50C99472E"",""keyed_name"":""Ansys Admin""},""modified_on"":""2023 - 03 - 24T04: 27:09"",""remote_url"":null,""state"":""Uncontrolled"",""state_image"":"".. / Images / ansys / State_Uncontrolled.svg"",""name"":""Hello"",""itemtype"":{ ""id"":""D441339CBF2644D9A231FE952C627322"",""name"":""Ans_Data""},""url"":""Ans_Data / E919A6371BEB4DAE93447CF79C57BB0E"",""rel.behavior"":""float"",""rel.keyed_name"":""C461A5DCB9E6420DAE855D795CA2B9D5"",""rel.link_type"":null,""rel.sort_order"":80,""rel.itemtype"":{ ""id"":""610787F9AD784CA9BCA12284A96E2117"",""name"":""Ans_DataChild""},""@relationship_id"":""C461A5DCB9E6420DAE855D795CA2B9D5"",""key"":""C461A5DCB9E6420DAE855D795CA2B9D5"",""is_favorite"":false}]";
+                string folderAndFileSelection = @"[{ ""archive_type"":null,""branch"":{ ""id"":""842256A605764CC19050D6847E8A90AA"",""keyed_name"":""Default""},""classification"":""Folder"",""keyed_name"":""Bug_Test"",""config_id"":""5EBD21D402A64564B1F2E5807B5559FA"",""file_size"":null,""icon"":"".. / Images / ansys / folder.svg"",""id"":""5EBD21D402A64564B1F2E5807B5559FA"",""id_path"":"" / 43199A7A8D6B45AC872FAF44AECE7155 / "",""is_folder"":true,""is_latest"":true,""local_file"":null,""locked_by_id"":null,""major_rev"":""001"",""modified_by_id"":{ ""id"":""30B991F927274FA3829655F50C99472E"",""keyed_name"":""Ansys Admin""},""modified_on"":""2023 - 04 - 04T02: 50:18"",""remote_url"":null,""state"":""Uncontrolled"",""state_image"":"".. / Images / ansys / State_Uncontrolled.svg"",""name"":""Bug_Test"",""itemtype"":{ ""id"":""D441339CBF2644D9A231FE952C627322"",""name"":""Ans_Data""},""folder_count"":""1"",""url"":""Ans_Data / 5EBD21D402A64564B1F2E5807B5559FA"",""rel.behavior"":""float"",""rel.keyed_name"":""405148699C6E4AB180D062AA738028CD"",""rel.link_type"":null,""rel.sort_order"":70,""rel.itemtype"":{ ""id"":""610787F9AD784CA9BCA12284A96E2117"",""name"":""Ans_DataChild""},""@relationship_id"":""405148699C6E4AB180D062AA738028CD"",""key"":""405148699C6E4AB180D062AA738028CD"",""is_favorite"":true},{ ""archive_type"":null,""branch"":{ ""id"":""842256A605764CC19050D6847E8A90AA"",""keyed_name"":""Default""},""classification"":""File / Simulation / Ansys"",""keyed_name"":""Cylinder.cas"",""config_id"":""6F138F2D430F4D5B956227095C448398"",""file_size"":{ ""label"":""840 KB"",""value"":859754},""icon"":"".. / Images / ansys / Fluent.svg"",""id"":""6F138F2D430F4D5B956227095C448398"",""id_path"":"" / 43199A7A8D6B45AC872FAF44AECE7155 / "",""is_folder"":false,""is_latest"":true,""local_file"":{ ""file_type"":{ ""id"":""129D6B69EDD84639A31C2CE1EC7DFAC8"",""keyed_name"":""Ansys Fluent Case""},""keyed_name"":""Cylinder.cas"",""id"":""E564F577698F4D319A3A0B0349E5DD3B"",""itemtype"":{ ""id"":""8052A558B9084D41B9F11805E464F443"",""name"":""File""} },""locked_by_id"":null,""major_rev"":""001"",""modified_by_id"":{ ""id"":""30B991F927274FA3829655F50C99472E"",""keyed_name"":""Ansys Admin""},""modified_on"":""2023 - 04 - 05T10: 11:35"",""remote_url"":null,""state"":""In Work"",""state_image"":"".. / Images / ansys / State_InWork.svg"",""name"":""Cylinder.cas"",""itemtype"":{ ""id"":""D441339CBF2644D9A231FE952C627322"",""name"":""Ans_Data""},""url"":""Ans_Data / 6F138F2D430F4D5B956227095C448398"",""rel.behavior"":""float"",""rel.keyed_name"":""4DC8F57ABBD445F0B5F40FDE86EA6278"",""rel.link_type"":null,""rel.sort_order"":110,""rel.itemtype"":{ ""id"":""610787F9AD784CA9BCA12284A96E2117"",""name"":""Ans_DataChild""},""@relationship_id"":""4DC8F57ABBD445F0B5F40FDE86EA6278"",""key"":""4DC8F57ABBD445F0B5F40FDE86EA6278"",""is_favorite"":false}]";
+                var data = new List<string>() { singleFolderSelection, twoFolderSelection, folderAndFileSelection };
+
+                var selectedList = convertStringToJsonElement(data);
+                return selectedList.Select(s => new object[] { s });
+            }
+        }
+
+        public static List<JsonElement> convertStringToJsonElement(List<string> data)
+        {
+            var selectedList = new List<JsonElement>();
+            foreach (var d in data)
+            {
+                JsonDocument doc = JsonDocument.Parse(d);
+                JsonElement root = doc.RootElement;
+                selectedList.Add(root);
+            }
+            return selectedList;
+        }
+
+        [Theory]
+        [InlineData(Utility.AwcLightTheme)]
+        [InlineData(Utility.AwcDarkTheme)]
+        [InlineData("theme://awc-invalid")]
+        [InlineData(null)]
+        [InlineData("")]
+        public async void Test_GetUiTheme(string? themeOption)
+        {
+            var mockLogger = new Mock<ILogger>();
+            var theme = await MinervaHelper.GetUiTheme(themeOption!, mockLogger.Object);
+            switch (themeOption)
+            {
+                case Utility.AwcLightTheme:
+                    Assert.Equal(Utility.LightTheme, theme);
+                    break;
+                case Utility.AwcDarkTheme:
+                    Assert.Equal(Utility.DarkTheme, theme);
+                    break;
+                case "theme://awc-invalid":
+                    Assert.Equal(Utility.LightTheme, theme);
+                    break;
+                case null:
+                    Assert.Equal(GetWindowsTheme(), theme);
+                    break;
+                case "":
+                    Assert.Equal(GetWindowsTheme(), theme);
+                    break;
+            }
+        }
+
+        private static string GetWindowsTheme()
+        {
+            int? res;
+            try
+            {
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    var themeValue = Registry.GetValue("HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", "AppsUseLightTheme", -1);
+                    if (themeValue is not null)
+                        res = (int)themeValue;
+                    else
+                        res = 1;
+                }
+                else
+                    res = 1;
+            }
+            catch
+            {
+                res = -1;
+            }
+            string? theme = res switch
+            {
+                0 => "dark",
+                _ => "light"
+            };
+            return theme;
+        }
+    }
+}

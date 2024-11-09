@@ -1,0 +1,176 @@
+﻿using Newtonsoft.Json;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace Ansys.Minerva.CmdTest.UnstageTest
+{
+    public class UnstageIntegrationTestForGlob
+    {
+        private readonly ITestOutputHelper _output;
+
+        public class FileSync
+        {
+            public List<string>? Staged;
+        }
+
+        public UnstageIntegrationTestForGlob(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+        private void ValidateStageResult(string fileSyncFilePath, string[] stagedItems)
+        {
+            try
+            {
+                using (StreamReader reader = new StreamReader(fileSyncFilePath, new FileStreamOptions() { Access = FileAccess.Read, Share = FileShare.Read, Mode = FileMode.Open }))
+                {
+                    string json = reader.ReadToEnd();
+
+                    FileSync? root = JsonConvert.DeserializeObject<FileSync>(json);
+
+                    foreach (string item in root.Staged)
+                    {
+                        Assert.Contains(item, stagedItems);
+                        int currentItemIndex = Array.IndexOf(stagedItems, item);
+                        stagedItems = stagedItems.Where((val, index) => index != currentItemIndex).ToArray();
+                    }
+                }
+                Assert.Empty(stagedItems);
+            }
+            catch (Exception ex)
+            {
+                _output.WriteLine(ex.ToString());
+                Assert.True(false);
+            }
+        }
+
+        private string fileSyncPath = Path.Combine(".minerva", "FileSync.json");
+
+        [Fact]
+        public async Task TestAllTextFileUnstageGlob()
+        {
+            await using (var context = new TestContext(_output, nameof(TestAllTextFileUnstageGlob)))
+            {
+                context.CreateNestedFolderStructure();
+
+                // Stage All
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*");
+
+                // Unstage Text files
+                await context.RunProcess("unstage", "-l", context.TestDataDirectory, "-g", "**/*.txt");
+
+                string[] stagedItems = {
+                    "Folder1",
+                    "Folder1/Folder1.1",
+                    "Folder1/Folder1.2",
+                    "Folder1/Folder1.1/Folder1.1.1",
+                    "Folder1/Folder1.1/Folder1.1.2"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestUnstageGlobWithWildCardFolderName()
+        {
+            await using (var context = new TestContext(_output, nameof(TestUnstageGlobWithWildCardFolderName)))
+            {
+                context.CreateNestedFolderStructure();
+
+                // Stage All
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*");
+
+                // Unstage Text files
+                await context.RunProcess("unstage", "-l", context.TestDataDirectory, "-g", "Folder1/Folder*/Folder*");
+
+                // Validation
+                string[] stagedItems = {
+                    "Folder1",
+                    "Folder1/Folder1.1",
+                    "Folder1/Folder1.2",
+                    "Folder1/Folder1.1/Folder1.1.1/TextFile1.1.1.1.txt",
+                    "Folder1/Folder1.2/TextFile1.2.1.txt"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestUnstageGlobWithMultipleCondition()
+        {
+            await using (var context = new TestContext(_output, nameof(TestUnstageGlobWithMultipleCondition)))
+            {
+                context.CreateMultiTypeFileStructure();
+
+                // Stage All
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*child/**/*");
+
+                // Unstage Text files
+                await context.RunProcess("unstage", "-l", context.TestDataDirectory, "-g", "**/*.md", "**/*.text", "**/*.mtext");
+
+                // Validation
+                string[] stagedItems = {
+                    "parent/child/assets",
+                    "parent/child/grandchild",
+                    "parent/child/index.js",
+                    "parent/child/assets/image.png",
+                    "parent/child/assets/image.svg",
+                    "parent/child/grandchild/style.css"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        // The .minervaignore file should have no effect on the unstage command
+        public async Task TestUnstageGlobWithMinervaIgnore()
+        {
+            await using (var context = new TestContext(_output, nameof(TestUnstageGlobWithMinervaIgnore)))
+            {
+                context.CreateMultiTypeFileStructure2();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files under a top level type1 directory",
+                    "type1/**/*",
+                    "# Ignore all instances of the settings.json file",
+                    "**/settings.json",
+                    "# Ignore all top-level .xml files",
+                    "*.xml",
+                    "# Any files under any type2 folder can be ignored",
+                    "**/type2/*",
+                    "# Except any files in a type3 folder",
+                    "!**/type2/type3/*"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+
+                // Stage All
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*", "--override-minervaignore");
+
+                // Unstage Text files
+                await context.RunProcess("unstage", "-l", context.TestDataDirectory, "-g", "**/*.txt");
+
+                // Validation
+                string[] stagedItems = { "Test-json-1.json", "Test-xml-1.xml", "type1/Test-json-2.json",
+                    "type1/type2/Test-json-3.json", "type1/type2/type3/settings.json", "type4/settings.json",
+                    "type4/Test-xml-2.xml", "type4/type2/settings.json", "type4/type2/Test-xml-3.xml",
+                    "type1", "type4", "type1/type2", "type1/type2/type3", "type4/type2"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+    }
+}

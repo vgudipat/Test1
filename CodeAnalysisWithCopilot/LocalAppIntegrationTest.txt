@@ -1,0 +1,676 @@
+﻿using Ansys.Minerva.IntegrationFramework.Common.Env;
+using Ansys.Minerva.Sdk;
+using CliWrap;
+using CliWrap.EventStream;
+using Newtonsoft.Json.Linq;
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.IO.Abstractions;
+using System.Linq;
+using System.Reactive.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Web;
+using System.Xml.Linq;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace Ansys.Minerva.CmdTest.LocalAppTests
+{
+	public class LocalAppIntegrationTest
+    {
+        private readonly ITestOutputHelper _output;
+        private readonly CmdEnvironment _cmdEnvironment;
+
+        public LocalAppIntegrationTest(ITestOutputHelper output)
+        {
+            _output = output;
+            _cmdEnvironment = new CmdEnvironment(new FileSystem());
+        }
+
+        [IgnoreForLinuxFact]
+        [Description("Task 1057532: Case 1: Write a test to Launch a Job and stop it without closing session.")]
+        public async Task TestLocalAppLaunchandStopWithoutClosingSession()
+        {
+            await using (var context = new TestContext(_output, $"TestApplLaunchandStopWithoutClosingSession"))
+            {
+                var connection = await context.Connect();
+
+                //Arrange: Create a custom python application, Upload files and create job Item
+                var customPythonApp = await CreatePythonApplication(connection);
+                FileItem _inputPythonFile = await UploadInputFile(context);
+                Item jobItem = await CreateJob(connection, customPythonApp.Id, _inputPythonFile.Container.ToString());
+                try
+                {
+                    var task = jobItem.Properties.Get("task").AsString();
+                    await RelaunchAnApplicationAsync(context, jobItem);
+
+                    await Task.Delay(TimeSpan.FromSeconds(3));
+
+                    // test.env should not created.
+                    var appLaunchDir = GetAppLaunchDirectory(task);
+                    Assert.False(File.Exists(Path.Combine(appLaunchDir, "test.env")));
+                    Assert.Contains("wrapper.py", Directory.GetFiles(appLaunchDir, "*.py").Select(x => Path.GetFileName(x)));
+                    Assert.Contains("changeTest.txt", Directory.GetFiles(appLaunchDir, "*.txt").Select(x => Path.GetFileName(x)));
+
+                    //Resume Application without closing a session
+                    var resumeApplicationUrl = await GenerateRelaunchURL(connection, _inputPythonFile.Container, jobId: jobItem.Id, sessionAlive: true);
+                    await context.RunProcess([HttpUtility.UrlDecode(resumeApplicationUrl)]);
+                    
+                    int attempts = 0;
+                    var jobStepsWithStatusWithoutCloseSession = new Dictionary<string, string>();
+                    IEnumerable<string> status;
+                    do
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(1));
+                        jobStepsWithStatusWithoutCloseSession = await GetJobSteps(connection, jobItem.Id);
+                        status = jobStepsWithStatusWithoutCloseSession
+                        .Where(x => !(string.Equals(x.Key, "Copy", StringComparison.OrdinalIgnoreCase) || string.Equals(x.Key, "OverallStatus", StringComparison.OrdinalIgnoreCase)))
+                        .Select(x => x.Value).Distinct();
+                        if (status.Count() == 1 && string.Equals(status.First(), "Completed", StringComparison.OrdinalIgnoreCase))
+                            break;
+                        attempts++;
+                    } while (attempts < 100);
+                    
+                    if (attempts >= 100)
+                        Assert.Fail("Timeout happened, Job steps haven't completed yet.");
+                    Assert.Equal("Pending", jobStepsWithStatusWithoutCloseSession["Copy"], ignoreCase: true);
+                    Assert.Single(status);
+                    Assert.Equal("Completed", status.First());
+                }
+                catch (Exception ex)
+                {
+                    Assert.Fail(ex.Message);
+                }
+                finally
+                {
+                    //Delete Generated task and Python Application
+                    await DeleteAppTasks(jobItem, connection);
+                }
+            }
+        }
+
+        [IgnoreForLinuxFact]
+        [Description("Task 1057534: Case 2: Write a test to re launch from a job after changes on digital thread and stop the launch without uploading anything to remote back.")]
+        public async Task TestLocalAppResumeLaunchWithCloseSession()
+        {
+            await using (var context = new TestContext(_output, $"TestResumeLocalAppLaunchWithCloseSession"))
+            {
+                var connection = await context.Connect();
+
+                //Arrange: Create a custom python application, Upload files and create job Item
+                var customPythonApp = await CreatePythonApplication(connection);
+                FileItem _inputPythonFile = await UploadInputFile(context);
+                Item jobItem = await CreateJob(connection, customPythonApp.Id, _inputPythonFile.Container.ToString());
+                try
+                {
+                    var launchURL = HttpUtility.UrlDecode(jobItem.Attributes.Get("launch_url").AsString()) + "&test-run=true";
+                    var task = jobItem.Properties.Get("task").AsString();
+                    var application = jobItem.Properties.Get("application").AsString();
+
+                    //Launch the application
+                    await context.RunProcess([launchURL]);
+                    var jobStepsWithStatusWithoutCloseSession = await GetJobSteps(connection, jobItem.Id);
+                    var status = jobStepsWithStatusWithoutCloseSession
+                        .Where(x => !(string.Equals(x.Key, "Copy", StringComparison.OrdinalIgnoreCase) || string.Equals(x.Key, "OverallStatus", StringComparison.OrdinalIgnoreCase)))
+                        .Select(x => x.Value).Distinct();
+                    var appLaunchDir = GetAppLaunchDirectory(task);
+
+                    Assert.Equal("Pending", jobStepsWithStatusWithoutCloseSession["Copy"], ignoreCase: true);
+                    Assert.Single(status);
+                    Assert.Equal("Completed", status.First());
+                    Assert.True(Directory.Exists(GetSessionSyncStoreDirectory(task)));
+                    Assert.True(Directory.Exists(appLaunchDir));
+                    Assert.True(File.Exists(Path.Combine(appLaunchDir, "wrapper.py")));
+
+                    //Resume the application
+                    var resumeApplicationUrl = await GenerateRelaunchURL(connection, _inputPythonFile.Container, jobId: jobItem.Id, extraParams: "close-session=true");
+                    await context.RunProcess([HttpUtility.UrlDecode(resumeApplicationUrl)]);
+                    var outputFiles = await GetTaskOutputFiles(connection, task);
+                    var jobStepsWithStatusWithCloseSession = (await GetJobSteps(connection, jobItem.Id))
+                        .Where(x => !string.Equals(x.Key, "OverallStatus", StringComparison.OrdinalIgnoreCase))
+                        .ToDictionary();
+                    var statusWithCloseSession = jobStepsWithStatusWithCloseSession.Values.Distinct();
+
+                    Assert.Contains("test.env", outputFiles);
+                    Assert.Contains("changeTest.txt", outputFiles);
+                    Assert.Equal(3, outputFiles.Count(x => string.Equals(Path.GetExtension(x), ".txt")));
+                    Assert.Single(statusWithCloseSession);
+                    Assert.Equal("Completed", statusWithCloseSession.First());
+                    Assert.False(Directory.Exists(GetSessionSyncStoreDirectory(task)));
+                    Assert.False(Directory.Exists(appLaunchDir));
+                }
+                catch (Exception ex)
+                {
+                    Assert.Fail(ex.Message);
+                }
+                finally
+                {
+                    //Delete Generated task and Python Application
+                    await DeleteAppTasks(jobItem, connection);
+                }
+            }
+        }
+
+        [IgnoreForLinuxFact]
+        [Description("Task 1057544: Case 5: Write a test to check if session & job has got closed on remote, if user choose upload-with-close-session.")]
+        public async Task TestLocalAppLaunchOnUploadWithCloseSession()
+        {
+            await using (var context = new TestContext(_output, $"TestLocalAppLaunchOnUploadWithCloseSession"))
+            {
+                var connection = await context.Connect();
+                //Arrange: Create a custom python application, Upload files and create job Item
+                var customPythonApp = await CreatePythonApplication(connection);
+                FileItem _inputPythonFile = await UploadInputFile(context);
+                Item jobItem = await CreateJob(connection, customPythonApp.Id, _inputPythonFile.Container.ToString());
+
+
+                try
+                {
+                    var task = jobItem.Properties.Get("task").AsString();
+                    var launchURL = HttpUtility.UrlDecode(jobItem.Attributes.Get("launch_url").AsString());
+                    launchURL += "&close-session=true";
+
+                    // Launch Application with close session
+                    await context.RunProcess([launchURL]);
+                    var jobStepsWithStatusWithCloseSession = await GetJobSteps(connection, jobItem.Id);
+                    var status = jobStepsWithStatusWithCloseSession.Select(x => x.Value).Distinct();
+
+                    Assert.False(Directory.Exists(GetSessionSyncStoreDirectory(task)));
+                    Assert.Single(status);
+                    Assert.Equal("Completed", status.First());
+
+                    var outputFiles = await GetTaskOutputFiles(connection, task);
+                    Assert.Contains("changeTest.txt", outputFiles);
+                    Assert.Contains("1.txt", outputFiles);
+                    Assert.Equal(2, outputFiles.Count(x => string.Equals(Path.GetExtension(x), ".txt")));
+
+                    var taskStatus = await GetTaskStatus(connection, task);
+                    Assert.Equal("Completed", taskStatus, ignoreCase: true);
+
+                }
+                catch (Exception ex)
+                {
+                    Assert.Fail(ex.Message);
+                }
+                finally
+                {
+                    //Delete Generated task and Python Application
+                    await DeleteAppTasks(jobItem!, connection);
+                }
+            }
+        }
+
+        [IgnoreForLinuxFact]
+        [Description("Task 1057546: Case 6: Write a test to check if the job & session used on the URL are already completed.")]
+        public async Task TestLocalAppLaunchWithCompletedJobAndSession()
+        {
+            await using (var context = new TestContext(_output, $"TestAppLaunchWithCompletedJobAndSession"))
+            {
+                var connection = await context.Connect();
+
+                //Arrange: Create a custom python application, Upload files and create job Item
+                var customPythonApp = await CreatePythonApplication(connection);
+                FileItem _inputPythonFile = await UploadInputFile(context);
+                Item jobItem = await CreateJob(connection, customPythonApp.Id, _inputPythonFile.Container.ToString());
+                try
+                {
+                    var task = jobItem.Properties.Get("task").AsString();
+                    var launchURL = HttpUtility.UrlDecode(jobItem.Attributes.Get("launch_url").AsString());
+                    launchURL += "&close-session=true";
+
+                    // Launch Application with close session
+                    var launch1 = await context.RunProcess([launchURL]);
+
+                    try
+                    {
+                        // Again launch the application with same job(in completed state)
+                        var launch2 = await context.RunProcess([launchURL]);
+                    }
+                    catch (Exception ex)
+                    {
+                        Assert.Contains("The job is already completed.", ex.Message);
+                    }
+                    try
+                    {
+                        //Resume Application without closing a session with same task(in completed state)
+                        var resumeApplicationUrl = await GenerateRelaunchURL(connection, _inputPythonFile.Container, taskId: task, applicationId: customPythonApp.Id);
+                    }
+                    catch (Exception ex)
+                    {
+                        Assert.Contains("The task should be in New, Preparing, or Active state.", ex.Message);
+                    }
+
+                }
+                catch (Exception ex)
+                {
+                    Assert.Fail(ex.Message);
+                }
+                finally
+                {
+                    //Delete Generated task and Python Application
+                    await DeleteAppTasks(jobItem, connection);
+                }
+            }
+        }
+
+        [IgnoreForLinuxFact]
+        [Description("Task 1057538: Case 3: Write a test to preserve customer data on local disc & remote after a crash on the app launched without closing the session and job.")]
+        public async Task TestLocalAppLaunchWithPythonProcessCrash()
+        {
+            await using (var context = new TestContext(_output, $"TestLocalAppWithPythonProcessCrash"))
+            {
+                //Arrange: Create a custom python application, Upload files and create job Item
+                var connection = await context.Connect();
+                var customPythonApp = await CreatePythonApplication(connection);
+                FileItem _inputPythonFile = await UploadInputFile(context);
+                Item jobItem = await CreateJob(connection, customPythonApp.Id, _inputPythonFile.Container.ToString());
+
+                try
+                {
+                    var launchURL = HttpUtility.UrlDecode(jobItem.Attributes.Get("launch_url").AsString());
+                    var task = jobItem.Properties.Get("task").AsString();
+                    var application = jobItem.Properties.Get("application").AsString();
+
+                    await RelaunchAppAndKillSubProcess(context, jobItem);
+
+                    var appLaunchDir = GetAppLaunchDirectory(task);
+                    Assert.True(Directory.Exists(appLaunchDir));
+                    var jobStepsWithStatusWithoutCloseSession = await GetJobSteps(connection, jobItem.Id);
+
+                    Assert.Equal("Running", jobStepsWithStatusWithoutCloseSession["OverallStatus"], ignoreCase: true);
+                    Assert.Equal("Completed", jobStepsWithStatusWithoutCloseSession["Download"], ignoreCase: true);
+                    Assert.Equal("Failed", jobStepsWithStatusWithoutCloseSession["Run"], ignoreCase: true);
+                    Assert.Equal("Pending", jobStepsWithStatusWithoutCloseSession["Copy"], ignoreCase: true);
+
+                    var taskStatus = await GetTaskStatus(connection, task);
+                    Assert.Equal("Active", taskStatus, ignoreCase: true);
+                }
+                catch (Exception ex)
+                {
+                    Assert.Fail(ex.Message);
+                }
+                finally
+                {
+                    //Delete Generated task and Python Application
+                    await DeleteAppTasks(jobItem, connection);
+                }
+            }
+        }
+
+        [IgnoreForLinuxFact]
+        [Description("Task 1057549: Case 7: Write a test to relaunch from a session with a new Job.")]
+        public async Task TestLocalAppRelaunchFromSameTaskWithDiffJob()
+        {
+            await using (var context = new TestContext(_output, $"TestLocalAppRelaunchFromSameTaskWithDiffJob"))
+            {
+                //Arrange: Create a custom python application, Upload files and create job Item
+                var connection = await context.Connect();
+                var customPythonApp = await CreatePythonApplication(connection);
+                FileItem _inputPythonFile = await UploadInputFile(context);
+                Item jobItem = await CreateJob(connection, customPythonApp.Id, _inputPythonFile.Container.ToString());
+
+                try
+                {
+                    var launchURL = HttpUtility.UrlDecode(jobItem.Attributes.Get("launch_url").AsString()) + "&test-run=true";
+                    var task = jobItem.Properties.Get("task").AsString();
+                    var application = jobItem.Properties.Get("application").AsString();
+
+                    await context.RunProcess(launchURL);
+                    var appLaunchDir = GetAppLaunchDirectory(task);
+                    Assert.True(Directory.Exists(appLaunchDir));
+
+                    //Resume Application with close session and with NEW JOB
+                    string resumeApplicationUrl = (await GenerateRelaunchURL(connection, _inputPythonFile.Container, taskId: task, applicationId: application)) + "&close-session=true";
+                    await context.RunProcess([HttpUtility.UrlDecode(resumeApplicationUrl)]);
+
+                    //Note: AppLaunch directory will be deleted, because we are launching two different jobs on SAME machine.
+                    //Actual usecase is, two different users will initiate two different jobs on separate machine or in separete users directory.
+                    //In that case, applaunch directory for running job will remain available in the appLaunch directory
+                    Assert.False(Directory.Exists(appLaunchDir));
+                    var jobSteps = await GetJobSteps(connection, jobItem.Id);
+
+                    //First Initiated job should be in running state.
+                    Assert.Equal("Running", jobSteps["OverallStatus"], ignoreCase: true);
+                    Assert.Equal("Pending", jobSteps["Copy"], ignoreCase: true);
+                    Assert.Equal("Completed", jobSteps["Download"], ignoreCase: true);
+                    Assert.Equal("Completed", jobSteps["Run"], ignoreCase: true);
+                    Assert.Equal("Completed", jobSteps["Upload"], ignoreCase: true);
+
+                    //Even we close the session, previous Job is in progress so session will not close.
+                    var taskStatus = await GetTaskStatus(connection, task);
+                    Assert.Equal("Active", taskStatus, ignoreCase: true);
+                }
+                catch (Exception ex)
+                {
+                    Assert.Fail(ex.Message);
+                }
+                finally
+                {
+                    //Delete Generated task and Python Application
+                    await DeleteAppTasks(jobItem, connection);
+                }
+            }
+        }
+
+        [IgnoreForLinuxFact]
+        [Description("Task 1057552: Case 8: Write a test to relaunch from a session with a new application and a new job.")]
+        public async Task TestLocalAppLaunchFromSameTaskWithDiffApplication()
+        {
+            await using (var context = new TestContext(_output, $"TestLocalAppLaunchFromSameTaskWithDiffApplication"))
+            {
+
+                //Arrange: Create a custom python application, Upload files and create job Item
+                var connection = await context.Connect();
+                var customPythonApp = await CreatePythonApplication(connection);
+                List<FileItem> inputFiles = await UploadInputFiles(context);
+
+                Item jobItem = await CreateJob(connection, customPythonApp.Id,
+                    inputFiles.First(x => string.Equals(x.Extension, ".py", StringComparison.OrdinalIgnoreCase)).Container.ToString());
+                try
+                {
+                    var launchURL = HttpUtility.UrlDecode(jobItem.Attributes.Get("launch_url").AsString()) + "&test-run=true";
+                    var task = jobItem.Properties.Get("task").AsString();
+                    var application = jobItem.Properties.Get("application").AsString();
+
+                    //Launch the python application
+                    await context.RunProcess([launchURL]);
+
+                    var testInputFile = inputFiles.Last(x => string.Equals(x.Extension, ".py", StringComparison.OrdinalIgnoreCase));
+
+                    var relaunchUrlFromTask = await GenerateRelaunchURL(connection, testInputFile.Container.ToString(), task, applicationId: customPythonApp.Id, extraParams: "close-session=true");
+
+                    //Launch the new instance of python application
+                    await context.RunProcess([relaunchUrlFromTask]);
+                    var differentJob = (await GetJobsFromTask(connection, task))
+                        .First(x => !string.Equals(x.Id, jobItem.Id, StringComparison.OrdinalIgnoreCase));
+
+                    var diffJobTask = differentJob.Properties.Get("task").AsString();
+
+                    //Task of both the jobs should be same
+                    Assert.Equal(diffJobTask, task);
+
+                    var firstJob = await GetJobSteps(connection, jobItem.Id);
+                    var secondJob = await GetJobSteps(connection, differentJob.Id);
+
+                    //First Initiated job should be in running state.
+                    Assert.Equal("Running", firstJob["OverallStatus"], ignoreCase: true);
+                    Assert.Equal("Pending", firstJob["Copy"], ignoreCase: true);
+                    Assert.Equal("Completed", firstJob["Download"], ignoreCase: true);
+                    Assert.Equal("Completed", firstJob["Run"], ignoreCase: true);
+                    Assert.Equal("Completed", firstJob["Upload"], ignoreCase: true);
+
+                    //All steps of Second job should be in completed state
+                    var secondJobStatus = secondJob.Where(x => !string.Equals(x.Key, "OverallStatus", StringComparison.OrdinalIgnoreCase))
+                        .ToDictionary().Values.Distinct();
+
+                    Assert.Single(secondJobStatus);
+                    Assert.Equal("Completed", secondJobStatus.Single(), ignoreCase: true);
+
+                    //Even we close the session, previous Job is in progress so session will not close.
+                    var taskStatus = await GetTaskStatus(connection, task);
+                    Assert.Equal("Active", taskStatus, ignoreCase: true);
+
+                }
+                catch (Exception ex)
+                {
+                    Assert.Fail(ex.Message);
+                }
+                finally
+                {
+                    //Delete Generated task and Python Application
+                    await DeleteAppTasks(jobItem, connection);
+                }
+            }
+        }
+
+        private string GetAppLaunchDirectory(string taskId)
+        {
+            var sessionSyncStoreLocation = GetSessionSyncStoreDirectory(taskId);
+            Assert.True(Directory.Exists(sessionSyncStoreLocation));
+            var sessionSyncStore = JObject.Parse(File.ReadAllText(Path.Combine(sessionSyncStoreLocation, "FileSync.json")));
+            return sessionSyncStore?.SelectToken("WorkingDir")?.Value<string>()!;
+        }
+
+        private string GetSessionSyncStoreDirectory(string task) => Path.Combine(_cmdEnvironment.GetMinervaAppDirectory(), ".sessions", $".minerva-{task}");
+        private static async Task<IEnumerable<string>> GetTaskOutputFiles(HttpConnection connection, string task)
+        {
+            var items = (await connection.ExecuteAsync(Query.Aml((IFormattable)
+                $@"<Item type='Ans_SimulationTask' action='ans_FileSys_GetFiles' id='{task}' relationship='ans_simTask_Output' select='url' level ='1' />"
+                ))).AssertItems();
+            return items
+                .Select(x => x.Properties.Get("filename").AsString());
+        }
+
+        private static async Task<IEnumerable<Item>> GetJobsFromTask(HttpConnection connection, string taskId)
+        {
+            return (await connection.ExecuteAsync(Query.Aml((IFormattable)
+                $@"<Item type='ans_JobExecution' action='get'>
+                    <task>{taskId}</task>
+                </Item>"
+                ))).AssertItems();
+        }
+        private static async Task<string> GetTaskStatus(HttpConnection connection, string task)
+        {
+            var taskItem = (await connection.ExecuteAsync(Query.Aml((IFormattable)
+                $@"<Item type='Ans_SimulationTask' action='get' id='{task}' select='state' />"
+                ))).AssertItem();
+
+            return taskItem?.Properties?.Get("state")?.AsString() ?? string.Empty;
+        }
+
+        private static async Task<Dictionary<string, string>> GetJobSteps(HttpConnection connection, string jobId)
+        {
+            var item = (await connection.ExecuteAsync(Query.Aml((IFormattable)
+                $@"<Item type='ans_JobExecution' action='ans_JobView_Get' id='{jobId}' />"
+                ))).AssertItem();
+
+            var dict = item.Relationships
+                .ToDictionary(x => x.Properties.Get("step").AsString(), x => x.Properties.Get("status").AsString());
+            dict.Add("OverallStatus", item.Properties.Get("status").AsString());
+            return dict;
+        }
+
+        private static async Task RelaunchAnApplicationAsync(TestContext context, Item jobItem)
+        {
+            var launchURL = HttpUtility.UrlDecode(jobItem.Attributes.Get("launch_url").AsString()) + "&test-run=true";
+            var taskId = jobItem.Properties.Get("task").AsString();
+
+            var cliExecutable = "AnsysMinerva_CLI.exe";
+            var result = Cli.Wrap(Path.Combine(Environment.CurrentDirectory, OperatingSystem.IsLinux() ? Path.GetFileNameWithoutExtension(cliExecutable) : cliExecutable))
+                .WithArguments(launchURL)
+                .WithEnvironmentVariables(new Dictionary<string, string?>()
+                {
+                    { "ANS_MINERVA_AUTH__MODE", "explicit" },
+                    { "ANS_MINERVA_AUTH__DATABASE", (string)context.Config.Element("db")! },
+                    { "ANS_MINERVA_AUTH__USER", (string)context.Config.Element("user")! ?? "admin" },
+                    { "ANS_MINERVA_AUTH__PASSWORD", (string)context.Config.Element("password")! ?? "minerva" },
+                    { "ANS_MINERVA_INTERACTIVE", "console" },
+                    { "ANS_MINERVA_LOGFILE", "stream://stderr" }
+                });
+
+
+            await result.Observe().ForEachAsync(async cmdEvent =>
+            {
+                switch (cmdEvent)
+                {
+                    //First Application is launched and started the relaunch
+                    case StartedCommandEvent started:
+                        var bufferResult = await context.RunProcess([launchURL]);
+                        Assert.NotNull(bufferResult);
+                        // Commenting below assertion as it's failing intermitently on pipeline
+                        /*bool relaunchApplicationError = bufferResult.StandardError.Contains("The application is already running.", StringComparison.OrdinalIgnoreCase)
+                         || bufferResult.StandardOutput.Contains("The application is already running.", StringComparison.OrdinalIgnoreCase);
+                        Assert.True(relaunchApplicationError);*/
+                        break;
+                }
+            });
+        }
+
+        private static async Task RelaunchAppAndKillSubProcess(TestContext context, Item jobItem)
+        {
+            var launch_url = jobItem.Attributes.Get("launch_url").AsString() ?? string.Empty;
+            Assert.NotEmpty(launch_url);
+
+            var launchURL = HttpUtility.UrlDecode(launch_url);
+            var taskId = jobItem.Properties.Get("task").AsString();
+
+            var cliExecutable = "AnsysMinerva_CLI.exe";
+            var result = Cli.Wrap(Path.Combine(Environment.CurrentDirectory, OperatingSystem.IsLinux() ? Path.GetFileNameWithoutExtension(cliExecutable) : cliExecutable))
+                .WithArguments(launchURL)
+                .WithEnvironmentVariables(new Dictionary<string, string?>()
+                {
+                    { "ANS_MINERVA_AUTH__MODE", "explicit" },
+                    { "ANS_MINERVA_AUTH__DATABASE", (string)context.Config.Element("db")! },
+                    { "ANS_MINERVA_AUTH__USER", (string)context.Config.Element("user")! ?? "admin" },
+                    { "ANS_MINERVA_AUTH__PASSWORD", (string)context.Config.Element("password")! ?? "minerva" },
+                    { "ANS_MINERVA_INTERACTIVE", "console" },
+                    { "ANS_MINERVA_LOGFILE", "stream://stderr" }
+                })
+                .WithValidation(CommandResultValidation.None);
+
+            await result.Observe().ForEachAsync(async cmdEvent =>
+            {
+                switch (cmdEvent)
+                {
+                    case StartedCommandEvent started:
+                        int attempts = 0;
+                        //Look for python process only for 5 secs, else get out of Killing python process logic and continue test to fail
+                        do
+                        {
+                            await Task.Delay(50);
+                            var pythonProcess = Process.GetProcesses().FirstOrDefault(x => string.Equals(x.ProcessName, "python", StringComparison.OrdinalIgnoreCase));
+                            if (pythonProcess != null)
+                            {
+                                pythonProcess.Kill();
+                                break;
+                            }
+                            attempts++;
+                        } while (attempts < 100);
+                        break;
+                }
+            });
+        }
+
+        private static async Task<Item> CreatePythonApplication(HttpConnection connection)
+        {
+            var pythonAppPath = Path.Combine(Directory.GetCurrentDirectory(), "LocalAppTests", "ApplicationAML", "PythonApplication.xml");
+            Assert.True(File.Exists(pythonAppPath));
+            var appAML = await File.ReadAllTextAsync(pythonAppPath);
+            var createdApp = (await connection.ExecuteAsync(Query.Aml(appAML))).AssertItem();
+            return createdApp;
+        }
+
+        private static async Task<Item> CreateJob(HttpConnection connection, string customAppId, string container)
+        {
+            var launchAppQuery = (await connection.ExecuteAsync(Query.Aml((IFormattable)
+                $@" <Item isNew='1' isTemp='1' type='Method' action='ans_Job_Create' id='2081351C5B3C462A94F721FBF1B0407C' application_type='local'>
+				    <application>{customAppId}</application>
+				    <name>{"Job " + Guid.NewGuid().ToArasId() + "for Ansys Admin"}</name>
+				    <context type='Ans_Data' relationship='undefined'>43199A7A8D6B45AC872FAF44AECE7155</context>
+				    <output_folder>ans_Data/43199A7A8D6B45AC872FAF44AECE7155</output_folder>
+				    <Relationships>
+					    <Item isNew='1' isTemp='1' url='{container}'/>
+				    </Relationships>
+			</Item>"))).AssertItem();
+            return launchAppQuery;
+
+        }
+
+        private static async Task<FileItem> UploadInputFile(TestContext context)
+        {
+            var folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+            var remoteDir = await context.CreateRemoteTestFolderAsync(folderName);
+            var folderView = new FolderViewModel(await context.Connect());
+            await folderView.TryNavigateToDefaultAsync();
+            await folderView.TryNavigateToAsync(remoteDir);
+            var fileItem = context.CreateRemoteData(new FileSize(1, BinaryPrefix.kB), $"MainInputFile{DateTime.UtcNow.ToString("_yyMMddHHmmssfff")}.py");
+            await folderView.UploadFilesAsync(new[] { fileItem }, overwrite: _ => OverwriteMode.Overwrite);
+
+            return fileItem;
+        }
+
+        private static async Task<List<FileItem>> UploadInputFiles(TestContext context)
+        {
+            var folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+            var remoteDir = await context.CreateRemoteTestFolderAsync(folderName);
+            var folderView = new FolderViewModel(await context.Connect());
+            await folderView.TryNavigateToDefaultAsync();
+            await folderView.TryNavigateToAsync(remoteDir);
+            var pythonFileItem = context.CreateRemoteData(new FileSize(1, BinaryPrefix.kB), $"MainInputFile{DateTime.UtcNow.ToString("_yyMMddHHmmssfff")}.py");
+            var pythonFileItem2 = context.CreateRemoteData(new FileSize(1, BinaryPrefix.kB), $"AdditionalInputFile{DateTime.UtcNow.ToString("_yyMMddHHmmssfff")}.py");
+            await folderView.UploadFilesAsync(new[] { pythonFileItem, pythonFileItem2 }, overwrite: _ => OverwriteMode.Overwrite);
+
+            return new List<FileItem>() { pythonFileItem, pythonFileItem2 };
+        }
+
+
+
+        private static async Task DeleteAppTasks(Item jobCreated, HttpConnection conn)
+        {
+            var taskId = jobCreated?.Properties?.Get("task")?.AsString();
+            var appId = jobCreated?.Properties?.Get("application")?.AsString();
+            var jobId = jobCreated?.Id ?? string.Empty;
+            try
+            {
+                var aml = new XElement("AML");
+                if (!string.IsNullOrEmpty(taskId) && !string.IsNullOrEmpty(jobId))
+                {
+                    aml.Add(new XElement("Item"
+                        , new XAttribute("type", "ans_JobExecution")
+                        , new XAttribute("action", "delete")
+                        , new XAttribute("id", jobId)));
+                    aml.Add(new XElement("Item"
+                    , new XAttribute("type", "Ans_SimulationTask")
+                    , new XAttribute("action", "delete")
+                    , new XAttribute("id", taskId)));
+                }
+                if (!string.IsNullOrEmpty(appId))
+                {
+                    aml.Add(new XElement("Item"
+                            , new XAttribute("type", "ans_Application")
+                            , new XAttribute("action", "delete")
+                            , new XAttribute("id", appId)));
+                }
+
+                await conn.ExecuteAsync(Query.Aml(aml).WithAction(SoapAction.ApplyAML)).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+            }
+        }
+
+        private static async Task<string> GenerateRelaunchURL(HttpConnection connection
+            , string inputContainer
+            , string? taskId = null
+            , string? jobId = null
+            , string? applicationId = null
+            , string? extraParams = null
+            , bool sessionAlive = false)
+        {
+            StringBuilder sb = new StringBuilder("<AML>");
+            sb.AppendLine($@"   <Item type='Method' action ='ans_GenerateLocalAppLaunchUrl'>");
+            if (!string.IsNullOrEmpty(taskId))
+                sb.AppendLine($@"       <task>{taskId}</task>");
+            if (!string.IsNullOrEmpty(applicationId))
+                sb.AppendLine($@"       <application>{applicationId}</application>");
+            if (!string.IsNullOrEmpty(inputContainer))
+                sb.AppendLine($@"       <input>{inputContainer}</input>");
+            if (!string.IsNullOrEmpty(jobId))
+                sb.AppendLine($@"       <job>{jobId}</job>");
+            if (!string.IsNullOrEmpty(extraParams))
+                sb.AppendLine($@"       <extraParams>{extraParams}</extraParams>");
+            sb.AppendLine($@"   </Item>{"\n"}</AML>");
+            var generateUrl = (await connection.ExecuteAsync(Query.Aml(sb.ToString()))).AssertItem();
+            var relaunchUrl = generateUrl.Attributes.Get("launch_url")?.AsString();
+            if(!string.IsNullOrEmpty(relaunchUrl) && sessionAlive)
+                relaunchUrl += "&test-run=true";
+
+            return relaunchUrl ?? string.Empty;
+        }
+    }
+}

@@ -1,0 +1,47 @@
+﻿using System.Threading.Tasks;
+using Xunit;
+using Xunit.Abstractions;
+using System.Text.Json;
+using Ansys.Minerva.IntegrationFramework.SdkImpl;
+using System.IO;
+using System;
+
+namespace Ansys.Minerva.CmdTest.SignInTest
+{
+    [Collection("Serial")]
+    public class SignInIntegrationTest
+    {
+        private readonly ITestOutputHelper _output;
+
+        public SignInIntegrationTest(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+        [Theory]
+        [InlineData("")]
+        [InlineData("--force")]
+        public async Task TestSignIn(string force)
+        {
+            await using var context = new TestContext(_output, $"TestSignIn");
+            var _connection = await context.Connect();
+            Assert.NotNull(_connection);
+            var res = await context.RunProcess("sign-in", "-u", context.Url.ToString(), "--output", "stream://stdout", force);
+            var commandOutputData = JsonSerializer.Deserialize<CommandOutputData>(res.StandardOutput.ToString());
+            Assert.NotNull(commandOutputData);
+            Assert.Equal(_connection.Url.ToString().Replace("/Server/", ""), commandOutputData?.Url, ignoreCase: true);
+            Assert.NotNull(commandOutputData?.Auth);
+            Assert.Equal(_connection.Session.Username, commandOutputData?.Auth?.User);
+            Assert.Equal(_connection.Session.Database, commandOutputData?.Auth?.Database);
+            Assert.NotNull(commandOutputData?.Auth?.AccessToken);
+            if (!string.IsNullOrEmpty(force))
+            {
+                Assert.NotNull(commandOutputData.Auth.RefreshToken);
+                Assert.NotEmpty(commandOutputData.Auth.RefreshToken);
+            }
+            else
+                Assert.Null(commandOutputData.Auth.RefreshToken);
+            Utils.VerifyGeneralRemoteCommandOutput(commandOutputData, Path.GetFullPath(Environment.CurrentDirectory), _connection);
+        }
+    }
+}

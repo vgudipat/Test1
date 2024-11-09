@@ -1,0 +1,49 @@
+﻿using Ansys.Minerva.CmdTest.Mocks;
+using Ansys.Minerva.IntegrationFramework.SdkImpl.Commands;
+using System.ComponentModel.DataAnnotations;
+using System.IO;
+using Xunit;
+
+namespace Ansys.Minerva.CmdTest.Get_Local
+{
+    public class Get_LocalUnitTest
+    {
+
+        [Theory]
+        [InlineData("Test-file-1.txt")]
+        [InlineData("Test-Folder")]
+        public void TestGetLocalDirectoryForFolderAndFilePath(string path)
+        {
+            using (var mock = new MockFileSyncJson())
+            {
+                var options = new GetLocalOptions() { Path = Path.Combine(mock.TestDataDirectory, path) };
+                var getlocal = new GetLocal(null, null, mock.mockFileSystem.FileSystem);
+                var expectedResult = mock.TestDataDirectory;
+                var actualResult = getlocal.GetLocalDirectory(options);
+                Assert.NotNull(actualResult);
+                Assert.Equal(expectedResult, actualResult);
+            }
+        }
+
+        [Fact]
+        public void TestGetLocalDirectoryForNonWorkingDir()
+        {
+            using (var mock = new MockFileSyncJson())
+            {
+                var options = new GetLocalOptions() { Path = Path.Combine(mock.TestDataDirectory, "NonWorkingDirPath") };
+                var getlocal = new GetLocal(null, null, mock.mockFileSystem.FileSystem);
+                var expectedException = new ValidationException("No working directory information found for the specified file or folder.");
+                try
+                {
+                    getlocal.GetLocalDirectory(options);
+                    Assert.True(false, "Expected an exception to be thrown due to no local directory found.");
+                }
+                catch (ValidationException actualException)
+                {
+                    Assert.Equal(actualException.GetType(), expectedException.GetType());
+                    Assert.Equal(actualException.Message, expectedException.Message);
+                }
+            }
+        }
+    }
+}

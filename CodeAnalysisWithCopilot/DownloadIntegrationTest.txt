@@ -1,0 +1,503 @@
+﻿using Ansys.Minerva.IntegrationFramework.SdkImpl;
+using Ansys.Minerva.Sdk;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Xunit;
+using Xunit.Abstractions;
+
+//[assembly: CollectionBehavior(DisableTestParallelization = true)]
+
+namespace Ansys.Minerva.CmdTest.DownloadTest
+{
+    [Collection("Serial")]
+    public class DownloadIntegrationTest
+    {
+        private readonly ITestOutputHelper _output;
+        
+        public DownloadIntegrationTest(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+		[Theory(DisplayName = "`download --no-session -u {URL} -r {REMOTE_FOLDER_PATH} -l {TEST_DIR}` should work with files of each size.")]
+		[MemberData(nameof(DownloadCases))]
+        public async Task TestFileSize(FileSize size)
+        {
+            await using (var context = new TestContext(_output, $"Download{size}"))
+            {
+                var folderName = "_" + DateTime.UtcNow.ToString("yyMMddHHmmss");
+                var remoteDir = await context.CreateRemoteTestFolderAsync(folderName);
+                var folderView = new FolderViewModel(await context.Connect());
+                await folderView.TryNavigateToDefaultAsync();
+                await folderView.TryNavigateToAsync(remoteDir);
+                var fileItem = context.CreateRemoteData(size);
+                await folderView.UploadFilesAsync(new[] { fileItem }, overwrite: _ => OverwriteMode.Overwrite);
+
+                await context.RunProcess("download", "--no-session", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory);
+
+                //Validate Files present in Local Folder
+                Assert.True(Directory.Exists(context.TestDataDirectory));
+                Assert.True(Directory.Exists(Path.Combine(context.TestDataDirectory, folderName)));
+                var fi = new FileInfo(Path.Combine(context.TestDataDirectory, folderName, fileItem.Name));
+                Assert.True(fi.Exists);
+                Assert.Equal((long)size, fi.Length);
+            }
+        }
+
+        public static IEnumerable<object[]> DownloadCases
+        {
+            get
+            {
+                var JsonFilePath = Path.Combine(Environment.CurrentDirectory, "FileUploadTestConfig.json");
+
+                List<FileConfigInfo>? FileConfig;
+                using (var reader = new StreamReader(JsonFilePath))
+                {
+                    var json = reader.ReadToEnd();
+                    FileConfig = JsonSerializer.Deserialize<List<FileConfigInfo>>(json);
+                }
+                var sizes = new HashSet<FileSize>()
+                {
+                    new FileSize(0, BinaryPrefix.B),
+                    new FileSize(1, BinaryPrefix.kB),
+                    new FileSize(100, BinaryPrefix.kB),
+                    new FileSize(1, BinaryPrefix.MB),
+                    new FileSize(1, BinaryPrefix.GB)
+                };
+
+                foreach (var item in FileConfig!)
+                {
+                    sizes.Add(new FileSize(item.size, Enum.Parse<BinaryPrefix>(item.unit ?? "B", true)));
+                }
+
+                return sizes.Select(s => new object[] { s });
+            }
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task DownloadFileWithDependencyOption(bool withDependencyOption)
+        {
+            // Create Remote Data - Main file, Child file
+            await using var _context = new TestContext(_output, $"DownloadFileWithDependency");
+            var folderItem = await _context.CreateRemoteTestFolderAsync("_" + DateTime.UtcNow.ToString("yyMMddHHmmss"));
+            var mainFileItem = _context.CreateRemoteData(new FileSize(10, BinaryPrefix.B), "MainFile");
+            var childFileItem = _context.CreateRemoteData(new FileSize(10, BinaryPrefix.B), "ChildFile");
+            var folderView = new FolderViewModel(await _context.Connect());
+            await folderView.TryNavigateToDefaultAsync();
+            await folderView.TryNavigateToAsync(folderItem);
+            await folderView.UploadFilesAsync(new[] { mainFileItem, childFileItem }, overwrite: _ => OverwriteMode.Overwrite);
+
+            var files = (await folderView.GetFileSystemItemsAsync()).ToList();
+            files[0].Container.TryGetId(out _, out string childFileId);
+            files[1].Container.TryGetId(out _, out string mainFileId);
+
+            // Establish dependency - Main file->Child file
+            var connection = await _context.Connect();
+            Assert.NotNull(connection);
+            await _context.CreateDependency(connection, mainFileId, childFileId);
+
+            List<string> cmdOptions = new List<string> { "download", "-n", "-u", _context.Url.ToString(), "-r", $"/Data/{folderItem.Name}/MainFile", "-l", _context.TestDataDirectory, "--output", "stream://stdout" };
+            if (withDependencyOption)
+                cmdOptions.Add("-d");
+
+            //Download Main file with dependency
+            var result = await _context.RunProcess(cmdOptions.ToArray());
+
+            //Validate downloaded folder structure
+            Assert.True(Directory.Exists(_context.TestDataDirectory));
+            Assert.True(File.Exists(Path.Combine(_context.TestDataDirectory, mainFileItem.Name)));
+
+            if (withDependencyOption)
+            {
+                //Validate dependency file is downloaded
+                Assert.True(File.Exists(Path.Combine(_context.TestDataDirectory, childFileItem.Name)));
+                ValidateDownloadoutput(result.StandardOutput.ToString(), new List<FileSystemItem> { mainFileItem }, connection, _context, new List<FileSystemItem> { childFileItem });
+            }
+            else
+            {
+                //Validate dependency file is not downloaded
+                Assert.False(File.Exists(Path.Combine(_context.TestDataDirectory, childFileItem.Name)));
+            }
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task DownloadFolderWithDependencyOption(bool withDependencyOption)
+        {
+            // Create Remote Data - Main file, Child file
+            await using var _context = new TestContext(_output, $"DownloadFileWithDependency");
+            var folderItem = await _context.CreateRemoteTestFolderAsync("_" + DateTime.UtcNow.ToString("yyMMddHHmmss"));
+            var mainFileItem = _context.CreateRemoteData(new FileSize(10, BinaryPrefix.B), "MainFile");
+            var childFileItem = _context.CreateRemoteData(new FileSize(10, BinaryPrefix.B), "ChildFile");
+            var folderView = new FolderViewModel(await _context.Connect());
+            await folderView.TryNavigateToDefaultAsync();
+            await folderView.TryNavigateToAsync(folderItem);
+            await folderView.UploadFilesAsync(new[] { mainFileItem }, overwrite: _ => OverwriteMode.Overwrite);
+            var files = (await folderView.GetFileSystemItemsAsync()).ToList();
+            files[0].Container.TryGetId(out _, out string mainFileId);
+            await folderView.TryNavigateToDefaultAsync();
+            await folderView.UploadFilesAsync(new[] { childFileItem }, overwrite: _ => OverwriteMode.Overwrite);
+            var files1 = (await folderView.GetFileSystemItemsAsync()).ToList();
+            var child = files1.FirstOrDefault(x => string.Equals(x.Name, childFileItem.Name));
+            Assert.NotNull(child);
+            child.Container.TryGetId(out _, out string childFileId);
+
+            // Establish dependency - Main file->Child file
+            var connection = await _context.Connect();
+            Assert.NotNull(connection);
+            await _context.CreateDependency(connection, mainFileId, childFileId);
+
+            List<string> cmdOptions = new List<string> { "download", "-n", "-u", _context.Url.ToString(), "-r", $"/Data/{folderItem.Name}", "-l", _context.TestDataDirectory, "--output", "stream://stdout" };
+            if (withDependencyOption)
+                cmdOptions.Add("-d");
+
+            //Download Main file with dependency
+            var result = await _context.RunProcess(cmdOptions.ToArray());
+
+            //Validate downloaded folder structure
+            Assert.True(Directory.Exists(_context.TestDataDirectory));
+            Assert.True(File.Exists(Path.Combine(_context.TestDataDirectory, folderItem.Name, mainFileItem.Name)));
+
+            if (withDependencyOption)
+            {
+                //Validate dependency file is downloaded
+                Assert.True(File.Exists(Path.Combine(_context.TestDataDirectory, folderItem.Name, childFileItem.Name)));
+                ValidateDownloadoutput(result.StandardOutput.ToString(), new List<FileSystemItem> { folderItem }, connection, _context, new List<FileSystemItem> { mainFileItem, childFileItem });
+            }
+            else
+            {
+                //Validate dependency file is not downloaded
+                Assert.False(File.Exists(Path.Combine(_context.TestDataDirectory, folderItem.Name, childFileItem.Name)));
+                ValidateDownloadoutput(result.StandardOutput.ToString(), new List<FileSystemItem> { folderItem }, connection, _context, new List<FileSystemItem> { mainFileItem });
+            }
+        }
+
+		[Theory(DisplayName = "`download -n -u {URL} -r {REMOTE_FOLDER_PATH} -l {TEST_DIR}` with/without `-c` should download the correct structure.")]
+		[InlineData(true)]
+        [InlineData(false)]
+        public async Task DownloadFileWithContentOption(bool withContentOption)
+        {
+            // Create Remote Data - Main file, Child file
+            await using var _context = new TestContext(_output, $"DownloadFileWithContentOption");
+            var folderItem = await _context.CreateRemoteTestFolderAsync("_" + DateTime.UtcNow.ToString("yyMMddHHmmss"));
+            var subFolderItem = await _context.CreateRemoteSubFolderAsync(folderItem, "_sub" + DateTime.UtcNow.ToString("yyMMddHHmmss"));
+            var testFileItem = _context.CreateRemoteData(new FileSize(10, BinaryPrefix.B), "TestFile");
+            var folderView = new FolderViewModel(await _context.Connect());
+            await folderView.TryNavigateToDefaultAsync();
+            await folderView.TryNavigateToAsync(folderItem);
+            await folderView.TryNavigateToAsync(subFolderItem);
+            await folderView.UploadFilesAsync(new[] { testFileItem });
+
+            List<string> cmdOptions = new List<string> { "download", "-n", "-u", _context.Url.ToString(), "-r", $"/Data/{folderItem.Name}", "-l", _context.TestDataDirectory };
+            if (withContentOption)
+                cmdOptions.Add("-c");
+
+            //Download folder
+            await _context.RunProcess(cmdOptions.ToArray());
+
+            //Validate downloaded folder structure
+            Assert.True(Directory.Exists(_context.TestDataDirectory));
+            if (withContentOption)
+            {
+                Assert.True(Directory.Exists(Path.Combine(_context.TestDataDirectory, subFolderItem.Name)));
+                Assert.True(File.Exists(Path.Combine(_context.TestDataDirectory, subFolderItem.Name, testFileItem.Name)));
+            }
+            else
+            {
+                Assert.True(Directory.Exists(Path.Combine(_context.TestDataDirectory, folderItem.Name)));
+                Assert.True(Directory.Exists(Path.Combine(_context.TestDataDirectory, folderItem.Name, subFolderItem.Name)));
+                Assert.True(File.Exists(Path.Combine(_context.TestDataDirectory, folderItem.Name, subFolderItem.Name, testFileItem.Name)));
+            }
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task DownloadFileWithOverwriteOption(bool withOverwriteOption)
+        {
+            // Create Remote Data - Main file, Child file
+            await using var _context = new TestContext(_output, $"DownloadFileWithContentOption");
+            var folderItem = await _context.CreateRemoteTestFolderAsync("_" + DateTime.UtcNow.ToString("yyMMddHHmmss"));
+            var testFileItem = _context.CreateRemoteData(new FileSize(10, BinaryPrefix.B), "TestFile");
+            var folderView = new FolderViewModel(await _context.Connect());
+            await folderView.TryNavigateToDefaultAsync();
+            await folderView.TryNavigateToAsync(folderItem);
+            await folderView.UploadFilesAsync(new[] { testFileItem });
+
+            List<string> cmdOptions = new List<string> { "download", "-n", "-u", _context.Url.ToString(), "-r", $"/Data/{folderItem.Name}/{testFileItem.Name}", "-l", _context.TestDataDirectory };
+            if (withOverwriteOption)
+                cmdOptions.Add("-o Overwrite");
+
+            try
+            {
+                //Download file
+                await _context.RunProcess(cmdOptions.ToArray());
+            }
+            catch (Exception ex)
+            {
+                if (withOverwriteOption)
+                {
+                    Assert.True(File.Exists(Path.Combine(_context.TestDataDirectory, testFileItem.Name)));
+                }
+                else
+                {
+                    Assert.Contains("destination already has files or folders named " + testFileItem.Name, ex.Message, StringComparison.OrdinalIgnoreCase);
+                    Assert.True(ex.GetType() == typeof(CliWrap.Exceptions.CommandExecutionException));
+                }
+            }
+        }
+
+		[Fact(DisplayName = "`download -n -u {URL} -l {TEST_DIR} --output stream://stdout -r` should produce the correct json for a file and folder.")]
+		public async Task DownloadWithOutputOption()
+        {
+            // Create Remote Data - Main file, Child file
+            await using var _context = new TestContext(_output, $"DownloadWithOutputOption");
+            var folderItem = await _context.CreateRemoteTestFolderAsync("_" + DateTime.UtcNow.ToString("yyMMddHHmmss"));
+            var testFileItem = _context.CreateRemoteData(new FileSize(10, BinaryPrefix.B), "TestFile" + DateTime.UtcNow.ToString("yyMMddHHmmss"));
+            var connection = await _context.Connect();
+            var folderView = new FolderViewModel(connection);
+            await folderView.TryNavigateToDefaultAsync();
+            await folderView.UploadFilesAsync(new[] { testFileItem });
+
+            List<string> cmdOptions = new List<string> { "download", "-n", "-u", _context.Url.ToString(), "-l", _context.TestDataDirectory, "--output", "stream://stdout", "-r" };
+            //Download file
+            cmdOptions.Add($"/Data/{testFileItem.Name}");
+            var fileResponse = await _context.RunProcess(cmdOptions.ToArray());
+            ValidateDownloadoutput(fileResponse.StandardOutput.ToString(), new List<FileSystemItem> { testFileItem }, connection, _context);
+
+            //Download folder
+            cmdOptions.RemoveAt(cmdOptions.Count - 1);
+            cmdOptions.Add($"/Data/{folderItem.Name}");
+            var folderResponse = await _context.RunProcess(cmdOptions.ToArray());
+            ValidateDownloadoutput(folderResponse.StandardOutput.ToString(), new List<FileSystemItem> { folderItem }, connection, _context);
+        }
+
+        [Fact]
+        public async Task DownloadWithMultipleRemotePaths()
+        {
+            // Create 2 Remote files
+            await using var _context = new TestContext(_output, $"DownloadWithMultipleRemotePaths");
+            var testFileItem1 = _context.CreateRemoteData(new FileSize(10, BinaryPrefix.B), "TestFile1" + DateTime.UtcNow.ToString("yyMMddHHmmss"));
+            var testFileItem2 = _context.CreateRemoteData(new FileSize(10, BinaryPrefix.B), "TestFile2" + DateTime.UtcNow.ToString("yyMMddHHmmss"));
+            var connection = await _context.Connect();
+            var folderView = new FolderViewModel(connection);
+            await folderView.TryNavigateToDefaultAsync();
+            await folderView.UploadFilesAsync(new[] { testFileItem1, testFileItem2 });
+
+            var relativePathToDownload = "MultipleRemotes";
+            List<string> cmdOptions = new List<string> { "download", "-n", "-u", _context.Url.ToString(), "-r", $"/Data/{testFileItem1.Name}", $"/Data/{testFileItem2.Name}", "-l", _context.TestDataDirectory, "--path", relativePathToDownload, "--output", "stream://stdout" };
+            var res = await _context.RunProcess(cmdOptions.ToArray());
+
+            ValidateDownloadoutput(res.StandardOutput.ToString(), new List<FileSystemItem> { testFileItem1, testFileItem2 }, connection, _context);
+            Assert.True(File.Exists(Path.Combine(_context.TestDataDirectory, relativePathToDownload, testFileItem1.Name)), $"Downloaded file {testFileItem1} not found");
+            Assert.True(File.Exists(Path.Combine(_context.TestDataDirectory, relativePathToDownload, testFileItem2.Name)), $"Downloaded file {testFileItem2} not found");
+        }
+
+        [Theory]
+        [InlineData("32F59FE73D2F45AEBBB8745D8FC779DC")]
+        [InlineData("NewParamDoc")]
+        public async Task DownloadParameterDocumentFile(string data)
+        {
+            await using (var context = new TestContext(_output, "DownloadParameterDocumentFile"))
+            {
+                // Prepare name, id, and path
+                string dataItemId, dataItemName, path;
+
+                if (string.IsNullOrEmpty(data))
+                    data = "SampleParamDoc";
+
+                if (Guid.TryParse(data, out Guid id))
+                {
+                    dataItemId = id.ToArasId();
+                    dataItemName = "SampleParamDoc";
+                    path = $"ans_Data/{dataItemId}";
+                }
+                else
+                {
+                    dataItemId = Guid.NewGuid().ToArasId();
+                    dataItemName = data;
+                    path = $"/Data/{dataItemName}";
+                }
+
+                string dataItemFullName = dataItemName + ".metadata";
+
+                var connection = await context.Connect();
+                Assert.NotNull(connection);
+
+                // Create fileless ans_Data item in the root folder
+                var folderView = new FolderViewModel(await context.Connect());
+                await folderView.TryNavigateToDefaultAsync();
+
+                var (dataItem, paramDoc) = await CreateFilelessParameterDocument(connection, folderView.FullPath.Current.Id, dataItemId, dataItemName);
+                Assert.NotNull(dataItem);
+                Assert.NotNull(paramDoc);
+
+                List<string> cmdOptions = new List<string> { "download", "-n", "-u", context.Url.ToString(), "-r", $"{path}", "-l", context.TestDataDirectory };
+
+                try
+                {
+                    //Download fileless parameter document
+                    await context.RunProcess(cmdOptions.ToArray());
+
+                    //Validate downloaded folder and file
+                    Assert.True(Directory.Exists(context.TestDataDirectory), $"{context.TestDataDirectory} is not exist.");
+                    Assert.True(File.Exists(Path.Combine(context.TestDataDirectory, dataItemFullName)), $"{dataItemFullName} file is not exist.");
+                }
+                finally
+                {
+                    await connection.ExecuteAsync(Query.DeleteAllVersions(dataItem));
+                    await connection.ExecuteAsync(Query.DeleteAllVersions(paramDoc));
+                }
+            }
+        }
+        [Fact]
+        public async Task TestDownloadModelWithSession()
+        {
+            await using (var context = new TestContext(_output, "TestDownloadModelWithSession"))
+            {
+                string dataFolderName = Guid.NewGuid().ToString();
+                Directory.CreateDirectory(Path.Combine(context.TestDataDirectory, dataFolderName));
+                string folderName = "_" + DateTime.UtcNow.ToString("yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                await context.RunProcess("upload", "-n", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory, "--version-folders", "Model");
+                var _connection = await context.Connect();
+                var dataFolder = (await _connection.ExecuteAsync(Query.Aml((IFormattable)$@"<Item action='get' type='ans_Data' select='id'><keyed_name condition='in'>{dataFolderName}</keyed_name></Item>"))).AssertItem();
+                await context.RunProcess("download", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/{dataFolderName}", "-l", Path.Combine(context.TestDataDirectory, "New"));
+                var filePath = Path.Combine(context.TestDataDirectory.ToString(), "New", ".minerva", "FileSync.json");
+                using StreamReader reader = new(filePath, new FileStreamOptions() { Access = FileAccess.Read, Share = FileShare.Read, Mode = FileMode.Open });
+                string json = reader.ReadToEnd();
+                var data = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
+                if (data!.TryGetValue("SessionId", out object? taskId))
+                {
+                    if (!string.IsNullOrEmpty(taskId?.ToString()))
+                    {
+                        var task = new Item(_connection.Session)
+                        {
+                            Type = "Ans_SimTask_Input",
+                            Action = "get",
+                        };
+                        task.Properties.Set("source_id", taskId.ToString());
+                        var taskInput = _connection.Execute(Query.Aml(task)).AssertItem();
+                        var taskInputItem = taskInput.Properties["related_id"].AsItem();
+                        Assert.Equal(dataFolderName, taskInputItem.Properties["keyed_name"].Value);
+                        Assert.Equal("Model", taskInputItem.Properties["classification"].Value);
+                        Assert.Equal(dataFolder.Id, taskInputItem.Id);
+                    }
+                }
+            }
+        }
+
+        private async Task<(Item, Item)> CreateFilelessParameterDocument(HttpConnection connection, string parentId,
+            string dataId, string dataName, string documentJson = null)
+        {
+            if (string.IsNullOrEmpty(dataId))
+                dataId = Guid.NewGuid().ToArasId();
+
+            if (string.IsNullOrEmpty(dataName))
+                dataName = "SampleParamDoc";
+
+            if (string.IsNullOrEmpty(documentJson))
+            {
+                documentJson = "{" +
+                    "\"@type\": \"section\"," +
+                    $"\"name\": \"{dataName}\"," +
+                    "\"id\": \"733239E26EB74C3F833E12D57699E21A\"," +
+                    "\"label\": \"Sample\"," +
+                    "\"role\": \"Material\"," +
+                    "\"Relationships\": [" +
+                        "{\"@type\": \"text\",\"name\": \"some_text\",\"value\": \"Sample text field\",\"label\": \"Some Text\",\"id\": \"A0F0F939756C4EFA84AB3D347C0831AE\"}," +
+                        "{\"@type\": \"number\",\"name\": \"some_number\",\"label\": \"Some Number\",\"value\": 120.1,\"unit\": \"kg\",\"id\": \"E9B1BB2A80F84C2D9B0DAD9FBA329D37\"}" +
+                    "]}";
+            }
+
+            var paramDoc = new Item(connection.Session)
+            {
+                Type = "ans_ParameterDocument",
+                Action = "add"
+            };
+            paramDoc.Properties.Add("document", documentJson);
+            paramDoc = (await connection.ExecuteAsync(Query.Aml(paramDoc.ToXml(connection.Session)))).AssertItem();
+
+            var ansData = new Item(connection.Session)
+            {
+                Type = "Ans_Data",
+                Action = "add",
+                Id = dataId
+            };
+            ansData.Properties.Add("parameter_doc", paramDoc.Id);
+            ansData.Properties.Add("name", dataName);
+            ansData.Properties.Add("archive_type", "CC41E42C7EF14FC4BC721EFE8654D809");
+
+            ansData = (await connection.ExecuteAsync(Query.Aml(ansData.ToXml(connection.Session)))).AssertItem();
+
+            var dataChild = new Item(connection.Session)
+            {
+                Type = "ans_DataChild",
+                Action = "add"
+            };
+            dataChild.Properties.Add("source_id", parentId);
+            dataChild.Properties.Add("related_id", dataId);
+
+            (await connection.ExecuteAsync(Query.Aml(dataChild.ToXml(connection.Session)))).AssertItem();
+
+            return (ansData, paramDoc);
+        }
+
+        private static void ValidateDownloadoutput(string jsonString, List<FileSystemItem> expectedItems, HttpConnection connection, TestContext context, List<FileSystemItem>? expectedRelatedItems = null)
+        {
+            Assert.NotNull(jsonString);
+            var cmdOutput = JsonSerializer.Deserialize<CommandOutputData>(jsonString);
+            Assert.NotNull(cmdOutput);
+            Assert.NotNull(cmdOutput.Items);
+            Assert.Equal(expectedItems.Count, cmdOutput.Items.Count);
+            ValidateItems(cmdOutput.Items, expectedItems);
+            Utils.VerifyGeneralRemoteCommandOutput(cmdOutput, Path.GetFullPath(context.TestDataDirectory), connection);
+
+            if (expectedRelatedItems == null)
+                return;
+            Assert.NotNull(cmdOutput.RelatedItems);
+            Assert.Equal(expectedRelatedItems.Count, cmdOutput.RelatedItems.Count);
+            ValidateItems(cmdOutput.RelatedItems, expectedRelatedItems);
+        }
+
+        private static void ValidateItems(List<SelectMetaData> items, List<FileSystemItem> expectedItems)
+        {
+            foreach (var item in items)
+            {
+                Assert.NotNull(item.Remote);
+                var expectedItem = expectedItems.FirstOrDefault(x => string.Equals(x.Name, item.Remote.Name));
+                Assert.NotNull(expectedItem);
+                if (expectedItem.GetType() == typeof(FileItem))
+                {
+                    Assert.False(item.IsDirectory);
+                    Assert.Equal("In Work", item.Remote.LifeCycleState);
+                }
+                else
+                {
+                    Assert.True(item.IsDirectory);
+                    Assert.Equal("Uncontrolled", item.Remote.LifeCycleState);
+                }
+                Assert.Equal("001", item.Remote.Revision);
+                Assert.Equal("Default", item.Remote.Branch);
+                Assert.True(item.Remote.IsLatest);
+                Assert.NotNull(item.Remote.LockedById);
+                Assert.Equal("NotClaimed", item.Remote.LockedById.Status);
+                Assert.Contains(string.Empty, item.Remote.LockedById.KeyedName, StringComparison.OrdinalIgnoreCase);
+                Assert.Equal(string.Empty, item.Remote.LockedById.Id);
+            }
+        }
+
+        private class FileConfigInfo
+        {
+            public int size;
+            public string? unit;
+        }
+    }
+}

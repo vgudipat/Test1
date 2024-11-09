@@ -1,0 +1,78 @@
+﻿using Ansys.Minerva.Sdk;
+using CliWrap.Buffered;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using System.Threading.Tasks;
+using System.Xml.Linq;
+using Xunit.Abstractions;
+
+namespace Ansys.Minerva.CmdTest
+{
+    internal abstract class BaseTestContext : ITestContext
+    {
+        public ITestOutputHelper Output { get; set; }
+        public string TestDataDirectory { get; set; }
+        protected readonly List<FolderItem> _createdFolders = new List<FolderItem>();
+        public Uri Url { get; set; }
+        public XElement Config { get; set; }
+		public string? Database => (string?)Config.Element("db") ?? "MinervaDB";
+		public string? Username => (string?)Config.Element("user") ?? "admin";
+
+		public abstract Task<HttpConnection> Connect();
+        public abstract Task<BufferedCommandResult> RunProcess(params string[] args);
+        public abstract ValueTask DisposeAsync();
+
+        protected BaseTestContext(ITestOutputHelper output, string testName)
+        {
+            Output = output;
+            TestDataDirectory = Path.Combine(Environment.CurrentDirectory, "TestData", testName);
+            Config = XElement.Load(Path.Combine(Environment.CurrentDirectory.Remove(Environment.CurrentDirectory.IndexOf($"{Path.DirectorySeparatorChar}bin")), "runSettings.xml"));
+            Url = new Uri((string)Config.Element("url")!);
+        }
+
+        public async Task<FolderItem> CreateRemoteTestFolderAsync(string folderName)
+        {
+            var rootFolderView = new FolderViewModel(await Connect());
+            await rootFolderView.TryNavigateToDefaultAsync();
+            var folder = await rootFolderView.CreateSubdirectoryAsync(folderName);
+            _createdFolders.Add(folder);
+            return folder;
+        }
+        public string CreateLocalData(FileSize size, string fileName = "", string content = "")
+        {
+            if (fileName == "")
+                fileName = UniqueFileName();
+            CreateLocalTestFile(fileName, size, content);
+            return fileName;
+        }
+
+        public string CreateLocalFile(FileSize size, string fileName = "", string content = "")
+        {
+            if (fileName == "")
+                fileName = UniqueFileName();
+            CreateLocalTestFile(fileName, size, content);
+            return fileName;
+        }
+
+        private void CreateLocalTestFile(string fileName, FileSize size, string content = "")
+        {
+            var fullPath = Path.Combine(TestDataDirectory, fileName);
+            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+            var fs = new FileStream(fullPath, FileMode.Create, FileAccess.Write, FileShare.None);
+            if (content == "")
+                using (fs) new RandomStream(size).CopyTo(fs);
+            else
+            {
+                byte[] info = new UTF8Encoding(true).GetBytes(content);
+                using (fs) fs.Write(info, 0, info.Length);
+            }
+        }
+        protected static string UniqueFileName()
+        {
+            return DateTime.UtcNow.ToString("yyMMddHHmmss") + ".txt";
+        }
+
+    }
+}

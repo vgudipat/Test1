@@ -1,0 +1,631 @@
+﻿using Newtonsoft.Json;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace Ansys.Minerva.CmdTest.StageTest
+{
+    public class StageIntegrationTestForGlob
+    {
+        private readonly ITestOutputHelper _output;
+
+        public class FileSync
+        {
+            public List<string>? Staged;
+        }
+
+        public StageIntegrationTestForGlob(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+        private void ValidateStageResult(string fileSyncFilePath, string[] stagedItems)
+        {
+            try
+            {
+                using (StreamReader reader = new StreamReader(fileSyncFilePath, new FileStreamOptions() { Access = FileAccess.Read, Share = FileShare.Read, Mode = FileMode.Open }))
+                {
+                    string json = reader.ReadToEnd();
+
+                    FileSync? root = JsonConvert.DeserializeObject<FileSync>(json);
+
+                    foreach (string item in root.Staged)
+                    {
+                        Assert.Contains(item, stagedItems);
+                        int currentItemIndex = Array.IndexOf(stagedItems, item);
+                        stagedItems = stagedItems.Where((val, index) => index != currentItemIndex).ToArray();
+                    }
+                }
+                Assert.Empty(stagedItems);
+            }
+            catch (Exception ex)
+            {
+                _output.WriteLine(ex.ToString());
+                throw;
+            }
+        }
+
+        private string fileSyncPath = Path.Combine(".minerva", "FileSync.json");
+
+        [Fact]
+        public async Task TestSingleFileStageGlob()
+        {
+            await using (var context = new TestContext(_output, nameof(TestSingleFileStageGlob)))
+            {
+                var fileName = context.CreateLocalData(new FileSize(0, BinaryPrefix.B));
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "*.txt");
+
+                // Validation
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, new string[] { fileName });
+            }
+        }
+
+        [Fact]
+        public async void TestSubDirectoryStageGlob()
+        {
+            await using (var context = new TestContext(_output, nameof(TestSubDirectoryStageGlob)))
+            {
+                context.CreateNestedFolderStructure();
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*");
+
+                // Validation
+                string[] stagedItems = {
+                    "Folder1",
+                    "Folder1/Folder1.1",
+                    "Folder1/Folder1.2",
+                    "Folder1/Folder1.1/Folder1.1.1",
+                    "Folder1/Folder1.1/Folder1.1.2",
+                    "Folder1/Folder1.1/Folder1.1.1/TextFile1.1.1.1.txt",
+                    "Folder1/Folder1.2/TextFile1.2.1.txt"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestTextFileOnlyStageGlob()
+        {
+            await using (var context = new TestContext(_output, nameof(TestTextFileOnlyStageGlob)))
+            {
+                context.CreateNestedFolderStructure();
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*.txt");
+
+                // Validation
+                string[] stagedItems = {
+                    "Folder1/Folder1.1/Folder1.1.1/TextFile1.1.1.1.txt",
+                    "Folder1/Folder1.2/TextFile1.2.1.txt"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobWithMultipleCondition()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithMultipleCondition)))
+            {
+                context.CreateMultiTypeFileStructure();
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*.md", "**/*.mtext");
+
+                // Validation
+                string[] stagedItems = {
+                    "parent/file.md",
+                    "parent/README.md",
+                    "parent/child/file.MD",
+                    "parent/child/more.md",
+                    "parent/child/sample.mtext",
+                    "parent/child/grandchild/file.md"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobAtArbitraryDepth()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobAtArbitraryDepth)))
+            {
+                context.CreateMultiTypeFileStructure();
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/assets/**/*");
+
+                // Validation
+                string[] stagedItems = {
+                    "parent/child/assets/image.png",
+                    "parent/child/assets/image.svg"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobWithWildCard()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithWildCard)))
+            {
+                context.CreateMultiTypeFileStructure();
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "parent/child/grandchild/s*");
+
+                // Validation
+                string[] stagedItems = {
+                    "parent/child/grandchild/style.css",
+                    "parent/child/grandchild/sub.text"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobWithMinervaIgnoreV1()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithMinervaIgnoreV1)))
+            {
+                context.CreateMultiTypeFileStructure2();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files under a top level type1 directory",
+                    "type1/**/*",
+                    "# Ignore all instances of the settings.json file",
+                    "**/settings.json",
+                    "# Ignore all top-level .xml files",
+                    "*.xml",
+                    "# Any files under any type2 folder can be ignored",
+                    "**/type2/*",
+                    "# Except any files in a type3 folder",
+                    "!**/type2/type3/*"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*");
+
+                // Validation
+                string[] stagedItems = { "Test-file-1.txt", "Test-file-2.txt", "Test-json-1.json", "type1",
+                    "type4", "type4/type2", "type1/type2/type3/settings.json", "type1/type2/type3/Test-file-5.txt",
+                    "type4/Test-xml-2.xml"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobWithMinervaIgnoreV1Override()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithMinervaIgnoreV1Override)))
+            {
+                context.CreateMultiTypeFileStructure2();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files under a top level type1 directory",
+                    "type1/**/*",
+                    "# Ignore all instances of the settings.json file",
+                    "**/settings.json",
+                    "# Ignore all top-level .xml files",
+                    "*.xml",
+                    "# Any files under any type2 folder can be ignored",
+                    "**/type2/*",
+                    "# Except any files in a type3 folder",
+                    "!**/type2/type3/*"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*", "--override-minervaignore");
+
+                // Validation
+                string[] stagedItems = { "Test-file-1.txt", "Test-file-2.txt", "Test-json-1.json",
+                    "Test-xml-1.xml", "type1/Test-file-3.txt", "type1/Test-json-2.json", "type1/type2/Test-file-4.txt",
+                    "type1/type2/Test-json-3.json", "type1/type2/type3/settings.json", "type1/type2/type3/Test-file-5.txt",
+                    "type4/settings.json", "type4/Test-xml-2.xml", "type4/type2/settings.json", "type4/type2/Test-xml-3.xml",
+                    "type1", "type4", "type1/type2", "type1/type2/type3", "type4/type2"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobWithMinervaIgnoreV1Override2()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithMinervaIgnoreV1Override2)))
+            {
+                context.CreateMultiTypeFileStructure2();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files under a top level type1 directory",
+                    "type1/**/*",
+                    "# Ignore all instances of the settings.json file",
+                    "**/settings.json",
+                    "# Ignore all top-level .xml files",
+                    "*.xml",
+                    "# Any files under any type2 folder can be ignored",
+                    "**/type2/*",
+                    "# Except any files in a type3 folder",
+                    "!**/type2/type3/*"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*", "--override-minervaignore", "**/*.json");
+
+                // Validation
+                string[] stagedItems = { "Test-file-1.txt", "Test-file-2.txt", "Test-json-1.json", "type1/Test-json-2.json", "type1",
+                    "type1/type2/Test-json-3.json", "type4", "type4/type2", "type1/type2/type3/settings.json", "type1/type2/type3/Test-file-5.txt",
+                    "type4/Test-xml-2.xml", "type4/settings.json", "type4/type2/settings.json"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        // Position of the override argument should not have any affect on the outcome
+        public async Task TestStageGlobWithMinervaIgnoreV1Override3()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithMinervaIgnoreV1Override3)))
+            {
+                context.CreateMultiTypeFileStructure2();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files under a top level type1 directory",
+                    "type1/**/*",
+                    "# Ignore all instances of the settings.json file",
+                    "**/settings.json",
+                    "# Ignore all top-level .xml files",
+                    "*.xml",
+                    "# Any files under any type2 folder can be ignored",
+                    "**/type2/*",
+                    "# Except any files in a type3 folder",
+                    "!**/type2/type3/*"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "--override-minervaignore", "-g", "**/*");
+
+                // Validation
+                string[] stagedItems = { "Test-file-1.txt", "Test-file-2.txt", "Test-json-1.json",
+                    "Test-xml-1.xml", "type1/Test-file-3.txt", "type1/Test-json-2.json", "type1/type2/Test-file-4.txt",
+                    "type1/type2/Test-json-3.json", "type1/type2/type3/settings.json", "type1/type2/type3/Test-file-5.txt",
+                    "type4/settings.json", "type4/Test-xml-2.xml", "type4/type2/settings.json", "type4/type2/Test-xml-3.xml",
+                    "type1", "type4", "type1/type2", "type1/type2/type3", "type4/type2"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobWithMinervaIgnoreV2()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithMinervaIgnoreV2)))
+            {
+                context.CreateMultiTypeFileStructure2();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files under a top level type1 directory",
+                    "type1/**/*",
+                    "# Ignore all top-level .xml files",
+                    "*.xml",
+                    "# Any files under any type2 folder can be ignored",
+                    "**/type2/*",
+                    "# Except any files in a type3 folder",
+                    "!**/type2/type3/*",
+                    "# Ignore all instances of the settings.json file",
+                    "**/settings.json"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*");
+
+                // Validation
+                string[] stagedItems = { "Test-file-1.txt", "Test-file-2.txt", "Test-json-1.json", "type1", "type4",
+                    "type4/type2", "type1/type2/type3/Test-file-5.txt", "type4/Test-xml-2.xml"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobWithMinervaIgnoreV3()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithMinervaIgnoreV3)))
+            {
+                context.CreateMultiTypeFileStructure2();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all top-level .xml files",
+                    "*.xml",
+                    "# Any files under any type2 folder can be ignored",
+                    "**/type2/*",
+                    "# Except any files in a type3 folder",
+                    "!**/type2/type3/*",
+                    "# Ignore all instances of the settings.json file",
+                    "**/settings.json",
+                    "# Ignore all files under a top level type1 directory",
+                    "type1/**/*"
+            };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*");
+
+                // Validation
+                string[] stagedItems = { "Test-file-1.txt", "Test-file-2.txt", "Test-json-1.json", "type1", "type4",
+                    "type4/type2", "type4/Test-xml-2.xml"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobWithMinervaIgnoreV4()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithMinervaIgnoreV4)))
+            {
+                context.CreateMultiTypeFileStructure2();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files under a top level type1 directory",
+                    "type1/**/*",
+                    "# Except any files in a type3 folder",
+                    "!**/type2/type3/*",
+                    "# Ignore all instances of the settings.json file",
+                    "**/settings.json",
+                    "# Ignore all top-level .xml files",
+                    "*.xml",
+                    "# Any files under any type2 folder can be ignored", "**/type2/*"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*");
+
+                // Validation
+                string[] stagedItems = { "Test-file-1.txt", "Test-file-2.txt", "Test-json-1.json", "type1", "type4",
+                    "type4/type2", "type4/Test-xml-2.xml"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobWithMinervaIgnoreV5()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithMinervaIgnoreV5)))
+            {
+                context.CreateMultiTypeFileStructure2();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files under a top level type1 directory",
+                    "type1/**/*",
+                    "# Ignore all instances of the settings.json file",
+                    "**/settings.json",
+                    "# Except for this one ",
+                    "!type1/type2/type3/settings.json",
+                    "# Ignore all top-level .xml files",
+                    "*.xml",
+                    "# Except for this one ",
+                    "!Test-xml-1.xml",
+                    "# Include all files that have \"Test-json\" in their name",
+                    "!**/*Test-json*"
+            };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*");
+
+                // Validation
+                string[] stagedItems = { "Test-file-1.txt", "Test-file-2.txt", "Test-json-1.json", "type1", "type4",
+                    "type4/type2", "type4/Test-xml-2.xml", "type1/type2/type3/settings.json", "Test-xml-1.xml",
+                    "type1/Test-json-2.json", "type1/type2/Test-json-3.json", "type4/type2/Test-xml-3.xml"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobWithMinervaIgnoreV6()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithMinervaIgnoreV6)))
+            {
+                context.CreateMultiTypeFileStructure2();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files under a top level type1 directory",
+                    "type1/**/*",
+                    "# Ignore all instances of the settings.json file",
+                    "**/settings.json",
+                    "# Except for this one ",
+                    "!type1/type2/type3/settings.json",
+                    "# Ignore all top-level .xml files",
+                    "*.xml",
+                    "# Except for this one ",
+                    "!Test-xml-1.xml",
+                    "# Include all files that have \"Test-json\" in their name",
+                    "!**/*Test-json*",
+                    "# Ignore all top-level files that have \"Test-file\" in their name",
+                    "*Test-file*"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*");
+
+                // Validation
+                string[] stagedItems = { "Test-json-1.json", "type1", "type4", "type4/type2", "type4/Test-xml-2.xml",
+                    "type1/type2/type3/settings.json", "Test-xml-1.xml", "type1/Test-json-2.json",
+                    "type1/type2/Test-json-3.json", "type4/type2/Test-xml-3.xml"
+                };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobWithMinervaIgnoreV7()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithMinervaIgnoreV7)))
+            {
+                context.CreateMultiTypeFileStructure2();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files under a top level type1 directory",
+                    "type1/**/*",
+                    "# Ignore all instances of the settings.json file",
+                    "**/settings.json",
+                    "# Except for this one ",
+                    "!type1/type2/type3/settings.json",
+                    "# Ignore all top-level .xml files",
+                    "*.xml",
+                    "# Except for this one ",
+                    "!Test-xml-1.xml",
+                    "# Include all files that have \"Test-json\" in their name",
+                    "!**/*Test-json*",
+                    "# Ignore all top-level files that have \"Test-file\" in their name",
+                    "*Test-file*"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/*.xml");
+
+                // Validation
+                string[] stagedItems = { "type4/Test-xml-2.xml", "Test-xml-1.xml", "type4/type2/Test-xml-3.xml" };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobWithMinervaIgnoreV8()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithMinervaIgnoreV8)))
+            {
+                context.CreateMultiTypeFileStructure2();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files under a top level type1 directory",
+                    "type1/**/*",
+                    "# Ignore all instances of the settings.json file",
+                    "**/settings.json",
+                    "# Except for this one ",
+                    "!type1/type2/type3/settings.json",
+                    "# Ignore all top-level .xml files",
+                    "*.xml",
+                    "# Except for this one ",
+                    "!Test-xml-1.xml",
+                    "# Include all files that have \"Test-json\" in their name",
+                    "!**/*Test-json*",
+                    "# Ignore all top-level files that have \"Test-file\" in their name",
+                    "*Test-file*"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "*.xml");
+
+                // Validation
+                string[] stagedItems = { "Test-xml-1.xml" };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobWithMinervaIgnoreV9()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithMinervaIgnoreV9)))
+            {
+                context.CreateMultiTypeFileStructure2();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files under a top level type1 directory",
+                    "type1/**/*",
+                    "# Ignore all instances of the settings.json file",
+                    "**/settings.json",
+                    "# Except for this one ",
+                    "!type1/type2/type3/settings.json",
+                    "# Ignore all top-level .xml files",
+                    "*.xml",
+                    "# Except for this one ",
+                    "!Test-xml-1.xml",
+                    "# Include all files that have \"Test-json\" in their name",
+                    "!**/*Test-json*",
+                    "# Ignore all top-level files that have \"Test-file\" in their name",
+                    "*Test-file*"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/settings.json");
+
+                // Validation
+                string[] stagedItems = { "type1/type2/type3/settings.json" };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+
+        [Fact]
+        public async Task TestStageGlobWithMinervaIgnoreV10()
+        {
+            await using (var context = new TestContext(_output, nameof(TestStageGlobWithMinervaIgnoreV10)))
+            {
+                context.CreateMultiTypeFileStructure2();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "# Ignore all files under a top level type1 directory",
+                    "type1/**/*",
+                    "# Ignore all instances of the settings.json file",
+                    "**/settings.json",
+                    "# Except for this one ",
+                    "!type1/type2/type3/settings.json",
+                    "# Ignore all top-level .xml files",
+                    "*.xml",
+                    "# Except for this one ",
+                    "!Test-xml-1.xml",
+                    "# Include all files that have \"Test-json\" in their name",
+                    "!**/*Test-json*",
+                    "# Ignore all top-level files that have \"Test-file\" in their name",
+                    "*Test-file*"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+
+                await context.RunProcess("stage", "-l", context.TestDataDirectory, "-g", "**/settings.json", "--override-minervaignore");
+
+                // Validation
+                string[] stagedItems = { "type1/type2/type3/settings.json", "type4/settings.json", "type4/type2/settings.json" };
+
+                string fileSyncFilePath = Path.Combine(context.TestDataDirectory, fileSyncPath);
+                ValidateStageResult(fileSyncFilePath, stagedItems);
+            }
+        }
+    }
+}

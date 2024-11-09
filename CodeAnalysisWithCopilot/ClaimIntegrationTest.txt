@@ -1,0 +1,134 @@
+using Ansys.Minerva.IntegrationFramework.SdkImpl;
+using Ansys.Minerva.Sdk;
+using System;
+using System.IO;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace Ansys.Minerva.CmdTest.ClaimTest
+{
+    [Collection("Serial")]
+    public class ClaimIntegrationTest
+    {
+        private readonly ITestOutputHelper _output;
+
+        public ClaimIntegrationTest(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+        [Fact(DisplayName = "`claim -r {REMOTE_FOLDER_PATH} -u {URL} --output stream://stdout` should claim folders in Minerva and return the correct output.")]
+        public async Task TestClaimFolderWithRemoteOption()
+        {
+            await using (var context = new TestContext(_output, $"TestClaimFolderWithRemoteOption"))
+            {
+                string folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                var res = await context.RunProcess("claim", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "--output", "stream://stdout", "-l", context.TestDataDirectory);
+                var _connection = await context.Connect();
+                Assert.NotNull(_connection);
+                await VerifyLockStatusInMinerva(_connection, folderName);
+                ValidateClaimCommandOutput(res.StandardOutput.ToString(), folderName, _connection, context);
+                return;
+            }
+        }
+
+        [Fact(DisplayName = "`claim -r {REMOTE_FILE_PATH} -u {URL} --output stream://stdout` should claim files in Minerva and return the correct output.")]
+        public async Task TestClaimFileWithRemoteOption()
+        {
+            await using (var context = new TestContext(_output, $"TestClaimFileWithRemoteOption"))
+            {
+                string fileName = context.CreateLocalData(new FileSize(10, BinaryPrefix.B));
+                string folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                await context.RunProcess("upload", "-n", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory);
+                var res = await context.RunProcess("claim", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/{fileName}", "--output", "stream://stdout", "-l", context.TestDataDirectory);
+                var _connection = await context.Connect();
+                Assert.NotNull(_connection);
+                await VerifyLockStatusInMinerva(_connection, fileName);
+                ValidateClaimCommandOutput(res.StandardOutput.ToString(), fileName, _connection, context);
+                return;
+            }
+        }
+
+        [Fact(DisplayName = "`claim -g **/* -l {TEST_DIR} -u {URL} --output stream://stdout` should claim downloaded files in Minerva and return the correct output.", Skip = "https://tfs.ansys.com:8443/tfs/ANSYS_Development/Portfolio/_workitems/edit/1128659")]
+        public async Task TestClaimFileWithGlobOption()
+        {
+            await using (var context = new TestContext(_output, $"TestClaimFileWithGlobOption"))
+            {
+                var folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+                var remoteDir = await context.CreateRemoteTestFolderAsync(folderName);
+                var folderView = new FolderViewModel(await context.Connect());
+                await folderView.TryNavigateToDefaultAsync();
+                await folderView.TryNavigateToAsync(remoteDir);
+                var fileItem = context.CreateRemoteData(new FileSize(1, BinaryPrefix.kB));
+                await folderView.UploadFilesAsync(new[] { fileItem }, overwrite: _ => OverwriteMode.Overwrite);
+                await context.RunProcess("download", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory);
+                var res = await context.RunProcess("claim", "-u", context.Url.ToString(), "-g", "**/*", "-l", context.TestDataDirectory, "--output", "stream://stdout");
+                var _connection = await context.Connect();
+                Assert.NotNull(_connection);
+                await VerifyLockStatusInMinerva(_connection, fileItem.Name);
+                ValidateClaimCommandOutput(res.StandardOutput.ToString(), fileItem.Name, _connection, context);
+                return;
+            }
+        }
+        [Fact]
+        public async Task TestClaimForFileClaimedByOtherUser()
+        {
+            await using (var adminContext = new TestContext(_output, $"TestClaimForFileClaimedByOtherUser"))
+            {
+                string fileName = adminContext.CreateLocalData(new FileSize(10, BinaryPrefix.B));
+                string folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+                await adminContext.CreateRemoteTestFolderAsync(folderName);
+                await adminContext.RunProcess("upload", "-n", "-u", adminContext.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", adminContext.TestDataDirectory);
+                var _adminConnection = await adminContext.Connect();
+                Assert.NotNull(_adminConnection);
+                FileItem remoteFileItm = await adminContext.GetFilePresentInRemoteFolderAsync(fileName, folderName);
+                Assert.True(remoteFileItm.Container.TryGetId(out _, out var id));
+                await using var userContext = await adminContext.CreateUserContextAsync();
+                var result = await userContext.RunProcess("claim", "-u", adminContext.Url.ToString(), "-r", $"ans_Data/{id}", "--output", "stream://stdout");
+                Assert.Equal(0, result.ExitCode);
+                var userConnection = await userContext.Connect();
+                try
+                {
+                    await VerifyLockStatusInMinerva(userConnection, fileName);
+                    var res = await adminContext.RunProcess("claim", "-u", adminContext.Url.ToString(), "-r", $"/Data/{folderName}/{fileName}", "--output", "stream://stdout");
+                }
+                catch (Exception ex)
+                {
+                    Assert.Contains("Aras.Server.Core.ItemIsLockedBySomeoneElseException", ex.Message);
+                }
+                finally
+                {
+                    await userConnection.ExecuteAsync(Query.Aml((IFormattable)$@"<Item type='ans_Data' action='unlock' id='{id}'/>"));
+                }
+            }
+        }
+
+        private async Task VerifyLockStatusInMinerva(HttpConnection connection, string itemName)
+        {
+            var item = (await connection.ExecuteAsync(Query.Aml((IFormattable)$@"<Item action='get' type='ans_Data' select='locked_by_id'><keyed_name>{itemName}</keyed_name></Item>"))).AssertItem();
+            Assert.NotNull(item.Properties["locked_by_id"]);
+            Assert.Equal(connection.Session.UserId, item.Properties["locked_by_id"].Value);
+        }
+
+        private static void ValidateClaimCommandOutput(string json, string itemName, HttpConnection connection, TestContext context)
+        {
+            Assert.NotNull(json);
+            var cmdOutput = JsonSerializer.Deserialize<CommandOutputData>(json);
+            Assert.NotNull(cmdOutput);
+            Assert.NotNull(cmdOutput.Items);
+            Assert.Single(cmdOutput.Items);
+            var item = cmdOutput.Items[0];
+            Assert.NotNull(item.Remote);
+            Assert.Equal(itemName, item.Remote.Name);
+            Assert.NotNull(item.Remote.LockedById);
+            Assert.Equal(ClaimStatus.ClaimedByMe.ToString(), item.Remote.LockedById.Status);
+            Assert.Contains(connection.Session.Username, item.Remote.LockedById.KeyedName, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(connection.Session.UserId, item.Remote.LockedById.Id);
+            Utils.VerifyGeneralRemoteCommandOutput(cmdOutput, Path.GetFullPath(context.TestDataDirectory), connection);
+        }
+    }
+}

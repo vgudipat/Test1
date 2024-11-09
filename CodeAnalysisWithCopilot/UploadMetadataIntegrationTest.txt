@@ -1,0 +1,667 @@
+﻿using Ansys.Minerva.Sdk;
+using Newtonsoft.Json.Linq;
+using Spectre.Console;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace Ansys.Minerva.CmdTest.UploadMetadataTest
+{
+    [Collection("Serial")]
+    public class UploadMetadataIntegrationTest
+    {
+        private readonly ITestOutputHelper _output;
+
+        public enum Extension
+        {
+            SLDPRT,
+            scdoc,
+            txt,
+            PNG
+        }
+
+        public UploadMetadataIntegrationTest(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+        [Fact]
+        public async Task UploadFileWithMetadata()
+        {
+            await using (var adminContext = new TestContext(_output, $"UploadFileWithMetadata"))
+            {
+                await using var userContext = await adminContext.CreateUserContextAsync();
+                //Arrange: Generate all test data
+                ParameterDocInfo info = new ParameterDocInfo(additionalFiles: true, extension: Extension.SLDPRT);
+                (string metadataFilename, string metadataFileContent) = info.GenerateSldprtParameterDoc(true);
+
+                info.CreateLocalData(userContext);
+                ParameterDocInfo.CreateLocalData(userContext, metadataFilename, metadataFileContent);
+
+                string folderName = $"UploadFileWithMetadata_{DateTime.UtcNow.ToString("_yyMMddHHmmssfff")}";
+                await userContext.CreateRemoteTestFolderAsync(folderName);
+
+                //Act: Verify connection and upload command with *.metadata
+                var _connection = await userContext.Connect();
+                await userContext.RunProcess("upload", "-n", "-u", userContext.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", userContext.TestDataDirectory);
+
+                //Assert : Assert connection to validate further AML queries
+                Assert.NotNull(_connection);
+
+                var ansDataItem = (await _connection.ExecuteAsync(Query.Aml((IFormattable)
+                    $@"<Item action='get' type='Ans_Data' select='parameter_doc, metadata_extraction_status'>
+                        <name>{info.NativeInputFile}</name>
+                        <Relationships>
+                            <Item action='get' type='ans_DataDependsOn' select='related_id'/>
+                            <Item action='get' type='Ans_DataChild' select='related_id'/>
+                        </Relationships>
+                       </Item>"))).AssertItem();
+
+                //Assert: Verify parameter doc exists and status is "Succeeded"
+                Assert.True(!string.IsNullOrEmpty(ansDataItem?.Properties["parameter_doc"].AsString()), "Parameter document not generated");
+                Assert.True(ansDataItem?.Properties["metadata_extraction_status"].AsString().Equals("Succeeded", StringComparison.OrdinalIgnoreCase), "Conversion status should be 'Succeeded'");
+
+                var parameterDocItm = (await _connection.ExecuteAsync(Query.Aml((IFormattable)
+                    $@"<Item action='get' type='ans_ParameterDocument' select='document' id='{ansDataItem?.Properties["parameter_doc"].ToString()}'/>"
+                    ))).AssertItem();
+
+                var parameterDoc = parameterDocItm?.Properties["document"].ToString() ?? string.Empty;
+                var scsFileItm = await FetchFileItemAsync(_connection, info.ViewableFile);
+                var thumbnailFileItm = await FetchFileItemAsync(_connection, info.ThumbnailFile);
+
+                //Assert: Verify 3D-image , thumbnail, dependent file and child files are attached properly to parameter doc or not
+                Assert.True(parameterDoc.Contains(scsFileItm.Id), "Parameter document not containing the reference of 3D file");
+                Assert.True(parameterDoc.Contains(thumbnailFileItm.Id), "Parameter document not containing the reference of thumbnail file");
+                Assert.True(ansDataItem.Relationships.Count(i => i.Type == "ans_DataDependsOn") == 1, "No dependent relationship found");
+                Assert.True(ansDataItem.Relationships.Count(x => x.Type == "Ans_DataChild") == 1, "No child found");
+            }
+        }
+
+        [Fact]
+        public async Task UploadMetadataMultipleTimes()
+        {
+            await using (var context = new TestContext(_output, $"UploadMetadataMultipleTimes"))
+            {
+                //Arrange: Generate all test data
+                ParameterDocInfo info = new ParameterDocInfo(additionalFiles: true, extension: Extension.SLDPRT);
+                (string metadataFilename, string metadataFileContent) = info.GenerateSldprtParameterDoc(true);
+
+                info.CreateLocalData(context);
+                ParameterDocInfo.CreateLocalData(context, metadataFilename, metadataFileContent);
+
+                string folderName = $"UploadMetadataMultipleTimes_{DateTime.UtcNow.ToString("_yyMMddHHmmssfff")}";
+                await context.CreateRemoteTestFolderAsync(folderName);
+
+                //Act: Verify connection and upload command with *.metadata
+                var _connection = await context.Connect();
+                //1st time metadata upload
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory, "-o", "Snapshot");
+                //2nd time metadata upload
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory, "-o", "Snapshot");
+                
+                //Assert : Assert connection to validate further AML queries
+                Assert.NotNull(_connection);
+
+                var ansDataItem = (await _connection.ExecuteAsync(Query.Aml((IFormattable)
+                    $@"<Item action='get' type='Ans_Data' select='parameter_doc, metadata_extraction_status'>
+                        <name>{info.NativeInputFile}</name>
+                        <Relationships>
+                            <Item action='get' type='ans_DataDependsOn' select='related_id'/>
+                            <Item action='get' type='Ans_DataChild' select='related_id'/>
+                        </Relationships>
+                       </Item>"))).AssertItem();
+
+                //Assert: Verify parameter doc exists and status is "Succeeded"
+                Assert.False(string.IsNullOrEmpty(ansDataItem.Properties["parameter_doc"].AsString()), "Parameter document not generated");
+                Assert.True(ansDataItem.Properties["metadata_extraction_status"].AsString().Equals("Succeeded", StringComparison.OrdinalIgnoreCase), "Conversion status should be 'Succeeded'");
+
+                var parameterDocItm = (await _connection.ExecuteAsync(Query.Aml((IFormattable)
+                    $@"<Item action='get' type='ans_ParameterDocument' select='document' id='{ansDataItem.Properties["parameter_doc"].ToString()}'/>"
+                    ))).AssertItem();
+
+                var parameterDoc = parameterDocItm?.Properties["document"].ToString() ?? string.Empty;
+                var scsFileItm = await FetchFileItemAsync(_connection, info.ViewableFile);
+                var thumbnailFileItm = await FetchFileItemAsync(_connection, info.ThumbnailFile);
+
+                //Assert: Verify 3D-image , thumbnail, dependent file and child files are attached properly to parameter doc or not
+                Assert.True(parameterDoc.Contains(scsFileItm.Id), "Parameter document not containing the reference of 3D file");
+                Assert.True(parameterDoc.Contains(thumbnailFileItm.Id), "Parameter document not containing the reference of thumbnail file");
+                Assert.True(ansDataItem.Relationships.Count(i => i.Type == "ans_DataDependsOn") == 1, "No dependent relationship found");
+                Assert.True(ansDataItem.Relationships.Count(x => x.Type == "Ans_DataChild") == 2, "2 children for 2 consecutive uploads not found");
+            }
+        }
+
+        [Fact]
+        public async Task UploadMetadataMultipleTimesWithUnsupportedSubjectFile()
+        {
+            await using (var context = new TestContext(_output, $"UploadMetadataMultipleTimesWithUnsupportedSubjectFile"))
+            {
+                //Arrange: Generate all test data
+                ParameterDocInfo info = new ParameterDocInfo(additionalFiles: true, extension: Extension.txt);
+                (string metadataFilename, string metadataFileContent) = info.GenerateTextParameterDoc();
+
+                info.CreateLocalData(context);
+                ParameterDocInfo.CreateLocalData(context, metadataFilename, metadataFileContent);
+
+                string folderName = $"UploadMetadataMultipleTimesWithUnsupportedSubjectFile_{DateTime.UtcNow.ToString("_yyMMddHHmmssfff")}";
+                await context.CreateRemoteTestFolderAsync(folderName);
+
+                //Act: Verify connection and upload command with *.metadata
+                var _connection = await context.Connect();
+                //1st time metadata upload
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory, "-o", "Snapshot");
+                //2nd time metadata upload
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory, "-o", "Snapshot");
+
+                //Assert : Assert connection to validate further AML queries
+                Assert.NotNull(_connection);
+
+                var ansDataItem = (await _connection.ExecuteAsync(Query.Aml((IFormattable)
+                    $@"<Item action='get' type='Ans_Data' select='parameter_doc, metadata_extraction_status'>
+                        <name>{info.NativeInputFile}</name>
+                        <Relationships>
+                            <Item action='get' type='ans_DataDependsOn' select='related_id'/>
+                            <Item action='get' type='Ans_DataChild' select='related_id'/>
+                        </Relationships>
+                       </Item>"))).AssertItem();
+
+                //Assert: Verify parameter doc exists and status is "Succeeded"
+                Assert.False(string.IsNullOrEmpty(ansDataItem.Properties["parameter_doc"].AsString()), "Parameter document not generated");
+                Assert.True(ansDataItem.Properties["metadata_extraction_status"].AsString().Equals("Succeeded", StringComparison.OrdinalIgnoreCase), "Conversion status should be 'Succeeded'");
+
+                var parameterDocItm = (await _connection.ExecuteAsync(Query.Aml((IFormattable)
+                    $@"<Item action='get' type='ans_ParameterDocument' select='document' id='{ansDataItem.Properties["parameter_doc"].ToString()}'/>"
+                    ))).AssertItem();
+
+                var parameterDoc = parameterDocItm?.Properties["document"].ToString() ?? string.Empty;
+                
+                //Assert: Verify dependent file and child files are attached properly to parameter doc or not
+                Assert.True(ansDataItem.Relationships.Count(i => i.Type == "ans_DataDependsOn") == 1, "No dependent relationship found");             
+            }
+        }
+
+        [Fact]
+        public async Task UploadMetadataWithMissingDependency()
+        {
+            await using (var adminContext = new TestContext(_output, $"UploadMetadataWithMissingDependency"))
+            {
+                await using var userContext = await adminContext.CreateUserContextAsync();
+                string thumbnailFileName = "thumbnail_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".png";
+                string metadataFileName = "metadata_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".metadata";
+                string nativeFileName = "CAD_File_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".scdoc";
+                string dependFile1Name = "depend_File1_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".scdoc";
+                string dependFile2Name = "depend_File2_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".scdoc";
+                string dependFile3Name = "depend_File3_" + DateTime.UtcNow.ToString("yyMMddHHmmss") + ".scdoc";
+                string metadataFileContent = string.Format("<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
+                                                            "<section name=\"CAD Model Report\">" +
+                                                                "<file role=\"subject\" src=\"" + nativeFileName + "\" created=\"2020-03-13T21:19:18Z\" appVersion=\"2020.1\" mimetype=\"application/ansys-scdoc\">" +
+                                                                    "<file role=\"dependency\" src=\"" + dependFile1Name + "\"/>" +
+                                                                    "<file role=\"dependency\" src=\"" + dependFile2Name + "\"/>" +
+                                                                    "<file role=\"dependency\" src=\"" + dependFile3Name + "\"/>" +
+                                                                "</file>" +
+                                                                "<file src=\"" + thumbnailFileName + "\" role=\"content\" name=\"CAD Model\" mimetype=\"image/png\" />" +
+                                                            "</section>");
+
+                userContext.CreateLocalFile(new FileSize(10, BinaryPrefix.B), thumbnailFileName);
+                userContext.CreateLocalFile(new FileSize(10, BinaryPrefix.B), metadataFileName, metadataFileContent);
+                userContext.CreateLocalFile(new FileSize(10, BinaryPrefix.B), nativeFileName);
+                userContext.CreateLocalFile(new FileSize(10, BinaryPrefix.B), dependFile1Name);
+                userContext.CreateLocalFile(new FileSize(10, BinaryPrefix.B), dependFile2Name);
+
+                string folderName = DateTime.UtcNow.ToString("_yyMMddHHmmssfff");
+                await userContext.CreateRemoteTestFolderAsync(folderName);
+                await userContext.RunProcess("upload", "-n", "-u", userContext.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", userContext.TestDataDirectory);
+                var _connection = await userContext.Connect();
+                Assert.NotNull(_connection);
+
+                Item? ansDataItem = (await _connection.ExecuteAsync(Query.Aml((IFormattable)$@"<Item action='get' type='Ans_Data' select='parameter_doc, metadata_extraction_status'>
+                                                                                                <name>{nativeFileName}</name>
+                                                                                                <Relationships>
+                                                                                                    <Item action='get' type='ans_DataDependsOn' select='related_id'/>
+                                                                                                    <Item action='get' type='Ans_DataChild' select='related_id'/>
+                                                                                                </Relationships>
+                                                                                                </Item>"))).AssertItem();
+                Assert.False(ansDataItem == null, $"{nativeFileName} ans data should exists");
+
+                var parameterDocId = ansDataItem.Properties.Get("parameter_doc").AsString();
+                var conversionStatus = ansDataItem.Properties.Get("metadata_extraction_status").AsString();
+                Assert.True(!string.IsNullOrEmpty(parameterDocId), "Parameter document not generated");
+                Assert.True(conversionStatus?.Equals("Complete with Errors"), "Conversion status should be 'Complete with Errors'");
+
+                var parameterDocItm = (await _connection.ExecuteAsync(Query.Aml((IFormattable)$@"<Item action='get' type='ans_ParameterDocument' select='document' id='{parameterDocId}'/>"))).AssertItem();
+                var parameterDoc = parameterDocItm.Properties.Get("document").AsString();
+
+                var thumbnailFileItm = await FetchFileItemAsync(_connection, thumbnailFileName);
+                Assert.True(parameterDoc.Contains(thumbnailFileItm.Id), "Parameter document not containing the reference of thumbnail file");
+                Assert.True(ansDataItem.Relationships.Count(x => x.Type == "ans_DataDependsOn") == 3, "Dependent relationship count should be 3");
+                Assert.True(ansDataItem.Relationships.Count(x => x.Type == "ans_DataDependsOn" && x.Properties["related_id"].ToString() != null) == 2, "Actual dependency count should be 2");
+                Assert.True(ansDataItem.Relationships.Count(x => x.Type == "ans_DataDependsOn" && x.Properties["related_id"].ToString() == null) == 1, "Missing dependency count should be 1");
+
+            }
+        }
+
+        [Fact]
+        public async Task UploadMultipleMetadataFile()
+        {
+            await using (var adminContext = new TestContext(_output, $"UploadMultipleMetadataFile"))
+            {
+                await using var userContext = await adminContext.CreateUserContextAsync();
+                ParameterDocInfo sldPrtInfo = new ParameterDocInfo(Extension.SLDPRT);
+                (string metadataFileName, string metadataContent) = sldPrtInfo.GenerateSldprtParameterDoc(false);
+                sldPrtInfo.CreateLocalData(userContext);
+                ParameterDocInfo.CreateLocalData(userContext, metadataFileName, metadataContent);
+
+                ParameterDocInfo scdocInfo = new ParameterDocInfo(Extension.scdoc);
+                (metadataFileName, metadataContent) = scdocInfo.GenerateSCDocParameterDoc(false);
+                scdocInfo.CreateLocalData(userContext);
+                ParameterDocInfo.CreateLocalData(userContext, metadataFileName, metadataContent);
+
+                string folderName = $"UploadMultipleMetadataFile_{DateTime.UtcNow.ToString("_yyMMddHHmmssfff")}";
+                await userContext.CreateRemoteTestFolderAsync(folderName);
+                await userContext.RunProcess("upload", "-n", "-u", userContext.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", userContext.TestDataDirectory);
+
+                var _connection = await userContext.Connect();
+                Assert.NotNull(_connection);
+                
+                IEnumerable<Item> ansDataItems;
+                int attempts = 0;
+                do
+                {
+                    bool succeeded = false;
+                    await Task.Delay(TimeSpan.FromSeconds(1));
+                    ansDataItems = (await _connection.ExecuteAsync(Query.Aml($@"<Item action='get' type='Ans_Data' select='parameter_doc, metadata_extraction_status, name'>
+                                                                                    <name condition='in'>'{sldPrtInfo.NativeInputFile}','{scdocInfo.NativeInputFile}'</name>                                                                                              
+                                                                         </Item>"))).AssertItems();
+                    succeeded = ansDataItems.All(x => string.Equals(x.Properties.Get("metadata_extraction_status").AsString(), "Succeeded", StringComparison.OrdinalIgnoreCase));  
+                    if (succeeded)
+                        break;
+                    attempts++;
+                } while (attempts < 100);
+
+                if (attempts >= 100)
+                    Assert.Fail("Timeout happened, Conversion status is not succeeded yet.");
+                foreach (var ansDataItem in ansDataItems)
+                {
+                    var parameterDocId = ansDataItem?.Properties["parameter_doc"]?.AsString() ?? string.Empty;
+                    var nativeFileName = ansDataItem?.Properties["name"]?.AsString() ?? string.Empty;
+                    var conversionStatus = ansDataItem?.Properties["metadata_extraction_status"]?.AsString() ?? string.Empty;
+                    Assert.True(!string.IsNullOrEmpty(parameterDocId), "Parameter document not generated");
+                    Assert.True(conversionStatus?.Equals("Succeeded"), "Conversion status should be 'Succeeded'");
+
+                    var parameterDocItm = (await _connection.ExecuteAsync(Query.Aml((IFormattable)
+                        $@"<Item action='get' type='ans_ParameterDocument' select='document' id='{parameterDocId}'/>"))).AssertItem();
+
+                    var parameterDoc = parameterDocItm?.Properties?.Get("document").AsString() ?? string.Empty;
+
+                    if (nativeFileName == sldPrtInfo.NativeInputFile)
+                    {
+                        var thumbnailFileItem = await FetchFileItemAsync(_connection, sldPrtInfo.ThumbnailFile);
+                        var scsFileItm = await FetchFileItemAsync(_connection, sldPrtInfo.ViewableFile);
+                        Assert.True(parameterDoc.Contains(thumbnailFileItem.Id), "Parameter document not containing the reference of sldprt thumbnail file");
+                        Assert.True(parameterDoc.Contains(scsFileItm.Id), "Parameter document not containing the reference of 3D file");
+                    }
+                    else
+                    {
+                        var scdocThumbnail = await FetchFileItemAsync(_connection, scdocInfo.ThumbnailFile);
+                        Assert.True(parameterDoc.Contains(scdocThumbnail.Id), "Parameter document not containing the reference of scdoc thumbnail file");
+                    }
+                }
+            }
+        }
+
+        [Fact]
+        public async Task UploadCorruptedMetadataFile()
+        {
+            await using (var adminContext = new TestContext(_output, $"UploadCorruptedMetadataFile"))
+            {
+                await using var userContext = await adminContext.CreateUserContextAsync();
+                ParameterDocInfo sldPrtInfo = new ParameterDocInfo(Extension.SLDPRT);
+                (string metadataFileName, string metadataContent) = sldPrtInfo.GenerateCorruptParameterDoc();
+                sldPrtInfo.CreateLocalData(userContext);
+                ParameterDocInfo.CreateLocalData(userContext, metadataFileName, metadataContent);
+
+                string folderName = $"UploadCorruptedMetadatafile_{DateTime.UtcNow.ToString("_yyMMddHHmmssfff")}";
+                var folderItem = await userContext.CreateRemoteTestFolderAsync(folderName);
+
+                await userContext.RunProcess("upload", "-n", "-u", userContext.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", userContext.TestDataDirectory);
+
+                var _connection = await userContext.Connect();
+                Assert.NotNull(_connection);
+
+                var ansDataItems = (await _connection.ExecuteAsync(Query.Aml((IFormattable)$@"<Item action='get' type='Ans_DataChild' select='related_id'>
+                                                                                                    <source_id>{folderItem.Id}</source_id>
+                                                                                                  </Item>"))).AssertItems();
+                Assert.True(ansDataItems.Count() == 4, "Uploaded ans_data count should be 4, as the *.metadata file is corrupted");
+            }
+        }
+
+        [Fact]
+        public async Task UploadFilelessParameterDoc()
+        {
+            await using (var adminContext = new TestContext(_output, $"UploadFilelessParameterDoc"))
+            {
+                await using var userContext = await adminContext.CreateUserContextAsync();
+                ParameterDocInfo sldPrtInfo = new ParameterDocInfo(Extension.SLDPRT);
+                (string metadataFileName, string metadataContent) = sldPrtInfo.GenerateFilelessParameterDoc();
+                sldPrtInfo.CreateLocalData(userContext);
+                ParameterDocInfo.CreateLocalData(userContext, metadataFileName, metadataContent);
+
+                string folderName = $"UploadFilelessParameterDoc{DateTime.UtcNow.ToString("_yyMMddHHmmssfff")}";
+                var folderItem = await userContext.CreateRemoteTestFolderAsync(folderName);
+
+                await userContext.RunProcess("upload", "-n", "-u", userContext.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", userContext.TestDataDirectory);
+
+                var _connection = await userContext.Connect();
+                Assert.NotNull(_connection);
+                var ansDataName = Path.GetFileNameWithoutExtension(metadataFileName);
+                var ansDataItem = (await _connection.ExecuteAsync(Query.Aml($@"<Item action='get' type='Ans_Data' select='parameter_doc, metadata_extraction_status, name'>
+                                                                                    <name condition='in'>'{ansDataName}'</name>
+                                                                                </Item>"))).AssertItem();
+
+                var parameterDocId = ansDataItem?.Properties["parameter_doc"]?.AsString() ?? string.Empty;
+                var parameterDocFileName = ansDataItem?.Properties["name"]?.AsString() ?? string.Empty;
+                var conversionStatus = ansDataItem?.Properties["metadata_extraction_status"]?.AsString() ?? string.Empty;
+
+                Assert.True(!string.IsNullOrEmpty(parameterDocId), "Parameter document not generated");
+                Assert.True(string.Equals(ansDataName, parameterDocFileName), "Uploaded file name should match with parameter document name");
+                Assert.True(string.Equals(conversionStatus, "Not Applicable"), "Conversion status should be 'Not Applicable'");
+
+                var parameterDocItm = (await _connection.ExecuteAsync(Query.Aml((IFormattable)
+                    $@"<Item action='get' type='ans_ParameterDocument' select='document' id='{parameterDocId}'/>"))).AssertItem();
+
+                var parameterDoc = parameterDocItm?.Properties?.Get("document").AsString() ?? string.Empty;
+
+                Assert.True(!string.IsNullOrEmpty(parameterDoc));
+                var subjectWithoutSrc = JObject.Parse(parameterDoc).SelectTokens("$.Relationships[?(@.role== 'subject')]").All(x => x["src"] == null);
+                Assert.True(subjectWithoutSrc, "Fileless parameter document should not contain src for each subject present in the document");
+
+            }
+        }
+
+        [Fact]
+        public async Task UpdateExistingFilelessParameterDoc()
+        {
+            await using (var adminContext = new TestContext(_output, $"UpdateExistingFilelessParameterDoc"))
+            {
+                await using var userContext = await adminContext.CreateUserContextAsync();
+                ParameterDocInfo sldPrtInfo = new ParameterDocInfo(Extension.SLDPRT);
+                (string metadataFileName, string metadataContent) = sldPrtInfo.GenerateFilelessParameterDoc();
+                sldPrtInfo.CreateLocalData(userContext);
+                ParameterDocInfo.CreateLocalData(userContext, metadataFileName, metadataContent);
+
+                string folderName = $"UpdateExistingFilelessParameterDoc{DateTime.UtcNow.ToString("_yyMMddHHmmssfff")}";
+                var folderItem = await userContext.CreateRemoteTestFolderAsync(folderName);
+
+                await userContext.RunProcess("upload", "-n", "-u", userContext.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", userContext.TestDataDirectory);
+
+                var _connection = await userContext.Connect();
+                Assert.NotNull(_connection);
+
+                var ans_DataName = Path.GetFileNameWithoutExtension(metadataFileName);
+                var ansDataItem = (await _connection.ExecuteAsync(Query.Aml($@"<Item action='get' type='Ans_Data' select='parameter_doc, metadata_extraction_status, name'>
+                                                                                    <name condition='in'>'{ans_DataName}'</name>
+                                                                                </Item>"))).AssertItem();
+
+                var parameterDocId = ansDataItem?.Properties["parameter_doc"]?.AsString() ?? string.Empty;
+                var parameterDocFileName = ansDataItem?.Properties["name"]?.AsString() ?? string.Empty;
+                var conversionStatus = ansDataItem?.Properties["metadata_extraction_status"]?.AsString() ?? string.Empty;
+
+                Assert.True(!string.IsNullOrEmpty(parameterDocId), "Parameter document not generated");
+                Assert.True(string.Equals(ans_DataName, parameterDocFileName), "Uploaded file name should match with parameter document name");
+                Assert.True(string.Equals(conversionStatus, "Not Applicable"), "Conversion status should be 'Not Applicable'");
+
+
+                var parameterDocItm = (await _connection.ExecuteAsync(Query.Aml((IFormattable)
+                    $@"<Item action='get' type='ans_ParameterDocument' select='document' id='{parameterDocId}'/>"))).AssertItem();
+
+                var parameterDoc = parameterDocItm?.Properties?.Get("document").AsString() ?? string.Empty;
+
+                Assert.True(!string.IsNullOrEmpty(parameterDoc));
+                var subjectWithoutSrc = JObject.Parse(parameterDoc).SelectTokens("$.Relationships[?(@.role== 'subject')]").All(x => x["src"] == null);
+                Assert.True(subjectWithoutSrc, "Fileless parameter document should not contain src for each subject present in the document");
+
+                //Update existing parameter doc.
+                ParameterDocInfo.CreateLocalData(userContext, metadataFileName, sldPrtInfo.GetUpdatedMetadataContent());
+                await userContext.RunProcess("upload", "-n", "-u", adminContext.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", adminContext.TestDataDirectory, "-o", "Snapshot");
+
+                var latestParameterDocansData = (await _connection.ExecuteAsync(Query.Aml($@"<Item action='get' type='Ans_Data' select='parameter_doc, metadata_extraction_status, name'>
+                                                                                    <name condition='in'>'{ans_DataName}'</name>
+                                                                                </Item>"))).AssertItem();
+
+                var latestparameterDocId = latestParameterDocansData?.Properties["parameter_doc"]?.AsString() ?? string.Empty;
+                var latestParameterDocFileName = latestParameterDocansData?.Properties["name"]?.AsString() ?? string.Empty;
+                var latestConversionStatus = latestParameterDocansData?.Properties["metadata_extraction_status"]?.AsString() ?? string.Empty;
+
+                Assert.True(!string.IsNullOrEmpty(parameterDocId), "Parameter document not generated");
+                Assert.True(string.Equals(ans_DataName, parameterDocFileName), "Uploaded file name should match with parameter document name");
+                Assert.True(string.Equals(conversionStatus, "Not Applicable"), "Conversion status should be 'Not Applicable'");
+
+                var latestParameterDocItem = (await _connection.ExecuteAsync(Query.Aml((IFormattable)
+                    $@"<Item action='get' type='ans_ParameterDocument' select='document' id='{latestparameterDocId}'/>"))).AssertItem();
+
+                var latestParameterDoc = latestParameterDocItem?.Properties?.Get("document").AsString() ?? string.Empty;
+                Assert.True(!string.IsNullOrEmpty(latestParameterDoc));
+                var latestParameterSectionData = JObject.Parse(latestParameterDoc).SelectTokens("$.Relationships.[?(@.name== 'Test')]").All(x => x.Value<bool>("value"));
+                Assert.True(latestParameterSectionData, "Update document test section value should be true");
+
+                var allVersions = (await _connection.ExecuteAsync(Query.GetAllVersions("ans_ParameterDocument", latestparameterDocId)))
+                    .OrderBy(i => i.Generation.Value)
+                     .ToList();
+
+                Assert.True(allVersions.Count == 2, "There should be two versions of Updated parameter document.");
+
+                //Old parameter document
+                var firstVersion = allVersions.FirstOrDefault(x => x.Id == parameterDocId)?.Properties?.Get("major_rev")?.AsString() ?? string.Empty;
+                //New Parameter document
+                var secondVersion = allVersions.FirstOrDefault(x => x.Id == latestparameterDocId)?.Properties?.Get("major_rev")?.AsString() ?? string.Empty;
+
+                Assert.True(string.Equals(firstVersion, "001"), "parameter document uploaded for the first time is versioned as 001");
+                Assert.True(string.Equals(secondVersion, "002"), "parameter document uploaded for the second time is versioned as 002");
+            }
+        }
+
+        [Fact]
+        public async Task UploadFileWhichDoesNotCreateConversionTaskWithMetadataFile()
+        {
+            await using (var adminContext = new TestContext(_output, $"UploadFileWhichDoesNotCreateConversionTaskWithMetadataFile"))
+            await using(var userContext = await adminContext.CreateUserContextAsync())
+            {
+
+                //Arrange: Generate all test data
+                ParameterDocInfo info = new ParameterDocInfo(additionalFiles: true, extension: Extension.PNG); 
+                (string metadataFilename, string metadataFileContent) = info.GenerateSldprtParameterDoc(true);
+
+                info.CreateLocalData(userContext);
+                ParameterDocInfo.CreateLocalData(userContext, metadataFilename, metadataFileContent);
+
+                string folderName = $"UploadFileWhichDoesNotCreateConversionTaskWithMetadataFile_{DateTime.UtcNow.ToString("_yyMMddHHmmssfff")}";
+                await userContext.CreateRemoteTestFolderAsync(folderName);
+
+                //Act: Verify connection and upload command with *.metadata
+                var _connection = await userContext.Connect();
+                await userContext.RunProcess("upload", "-n", "-u", userContext.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", userContext.TestDataDirectory);
+
+                var ansDataItem = (await _connection.ExecuteAsync(Query.Aml((IFormattable)
+                    $@"<Item action='get' type='Ans_Data' select='parameter_doc, metadata_extraction_status'>
+                        <name>{info.NativeInputFile}</name>
+                        <Relationships>
+                            <Item action='get' type='ans_DataDependsOn' select='related_id'/>
+                            <Item action='get' type='Ans_DataChild' select='related_id'/>
+                        </Relationships>
+                       </Item>"))).AssertItem();
+
+                //Assert: Verify parameter doc exists and status is "Succeeded"
+                Assert.False(string.IsNullOrEmpty(ansDataItem.Properties["parameter_doc"].AsString()), "Parameter document not generated");
+                Assert.True(ansDataItem.Properties["metadata_extraction_status"].AsString().Equals("Succeeded", StringComparison.OrdinalIgnoreCase), "Conversion status should be 'Succeeded'");
+
+                var parameterDocItm = (await _connection.ExecuteAsync(Query.Aml((IFormattable)
+                    $@"<Item action='get' type='ans_ParameterDocument' select='document' id='{ansDataItem.Properties["parameter_doc"].ToString()}'/>"
+                    ))).AssertItem();
+
+                var parameterDoc = parameterDocItm?.Properties["document"].ToString() ?? string.Empty;
+                var scsFileItm = await FetchFileItemAsync(_connection, info.ViewableFile);
+                var thumbnailFileItm = await FetchFileItemAsync(_connection, info.ThumbnailFile);
+
+                //Assert: Verify 3D-image , thumbnail, dependent file and child files are attached properly to parameter doc or not
+                Assert.True(parameterDoc.Contains(scsFileItm.Id), "Parameter document not containing the reference of 3D file");
+                Assert.True(parameterDoc.Contains(thumbnailFileItm.Id), "Parameter document not containing the reference of thumbnail file");
+                Assert.True(ansDataItem.Relationships.Count(i => i.Type == "ans_DataDependsOn") == 1, "No dependent relationship found");
+                Assert.True(ansDataItem.Relationships.Count(x => x.Type == "Ans_DataChild") == 1, "No child found");
+            }
+        }
+
+        public async Task<Item> FetchFileItemAsync(HttpConnection _connection, string fileName)
+        {
+            return (await _connection.ExecuteAsync(Query.Aml((IFormattable)$@"<Item action='get' type='File' select='id, name, created_on' orderBy='created_on'><filename>{fileName}</filename></Item>"))).AssertItems().Last();
+        }
+
+        private sealed class ParameterDocInfo
+        {
+            private readonly string _dateTimeStamp;
+            private readonly Extension _extension;
+            public string NativeInputFile { get; private set; }
+            public ValueTuple<string, string> MetadataFile { get; private set; }
+            public string ViewableFile { get; private set; }
+            public string ThumbnailFile { get; private set; }
+            public List<string> DependentFiles { get; private set; } = new List<string>();
+            public string DataChildFile { get; private set; }
+
+            public ParameterDocInfo(Extension extension)
+            {
+                _dateTimeStamp = DateTime.UtcNow.ToString("yyMMddHHmmssfff");
+                _extension = extension;
+                NativeInputFile = $"NativeFile_{_dateTimeStamp}.{_extension}";
+                MetadataFile = ($"{_extension} metadata_{_dateTimeStamp}.metadata", "");
+                ViewableFile = $"3D_Image_{_dateTimeStamp}.scs";
+                ThumbnailFile = $"thumbnail_{_dateTimeStamp}.png";
+            }
+
+            public ParameterDocInfo(bool additionalFiles, Extension extension) : this(extension)
+            {
+                if (additionalFiles)
+                {
+                    DependentFiles.Add($"depend_File_{_dateTimeStamp}.txt");
+                    DataChildFile = $"child_File_{_dateTimeStamp}.txt";
+                }
+            }
+
+            public ValueTuple<string, string> GenerateSldprtParameterDoc(bool isAdditionalFilesRequired)
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine($@"<?xml version=""1.0"" encoding = ""utf-8"" ?>");
+                sb.AppendLine($@"<section name=""CAD Model Report"">");
+                sb.AppendLine($@"   <file role=""subject"" src=""{NativeInputFile}"" application=""Solidwork"" appVersion=""Official version for SolidWorks 2018"" mimetype=""application/dassault-solidworks-prt"">");
+                sb.AppendLine($@"       <file role=""thumbnail"" src=""{ThumbnailFile}"" mimetype=""image/png"" />");
+
+                if (isAdditionalFilesRequired)
+                {
+                    foreach (string dependentFile in DependentFiles)
+                        sb.AppendLine($@"       <file role=""dependency"" src=""{dependentFile}"" />");
+                    sb.AppendLine($@"       <file role=""child"" src=""{DataChildFile}"" />");
+                }
+
+                sb.AppendLine("   </file>");
+                sb.AppendLine($@"   <file role=""content"" src=""{ViewableFile}"" mimetype=""model/hoops-scs"" />""");
+                sb.AppendLine($@"   <section name=""Model Information"">");
+                sb.AppendLine($@"       <text name=""Units"" value=""millimeter"" />");
+                sb.AppendLine("     </section> ");
+                sb.AppendLine($@"   <file src=""{ThumbnailFile}"" role=""content"" name=""Image"" mimetype=""image/png"" />");
+                sb.AppendLine("</section>");
+
+                return ($"{_extension}metadata_{_dateTimeStamp}.metadata", sb.ToString());
+            }
+
+            public ValueTuple<string, string> GenerateSCDocParameterDoc(bool addError)
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine(@"<?xml version=""1.0"" encoding=""utf-8""?>");
+                sb.AppendLine(@"<section name=""CAD Model Report"">");
+                sb.AppendLine($@"<file role=""subject"" src=""{NativeInputFile}"" created=""2020-03-13T21:19:18Z"" appVersion=""2020.1"" mimetype=""application/ansys-scdoc"">");
+                foreach (var dependency in DependentFiles)
+                {
+                    sb.AppendLine($@"   <file role=""dependency"" src=""{dependency}""/>");
+                }
+                if (addError)
+                {
+                    sb.AppendLine(@"    <doc role=""error"" value=""File content not found or added for inputFile:  with Id: e03845e7-f72d-4a87-a4a2-3b6811f330f3"">");
+                    sb.AppendLine(@"<text name=""StackTrace"" value="""" />");
+                    sb.AppendLine(@"<text name=""Application"" value=""scdoc-dependency-extractor"" />");
+                    sb.AppendLine("</doc>");
+                }
+                sb.AppendLine("</file>");
+                sb.AppendLine($@"<file src=""{ThumbnailFile}"" role=""content"" name=""CAD Model"" mimetype=""image/png"" />");
+                sb.AppendLine("</section>");
+                return ($"{_extension}metadata_{_dateTimeStamp}.metadata", sb.ToString());
+            }
+
+            public ValueTuple<string, string> GenerateTextParameterDoc()
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine(@"<?xml version=""1.0"" encoding=""utf-8""?>");
+                sb.AppendLine(@"<section name=""Text Report"">");
+                sb.AppendLine($@"<file role=""subject"" src=""{NativeInputFile}"">");
+                foreach (var dependency in DependentFiles)
+                {
+                    sb.AppendLine($@"   <file role=""dependency"" src=""{dependency}""/>");
+                }
+                sb.AppendLine("</file>");
+                sb.AppendLine("</section>");
+                return ($"{_extension}metadata_{_dateTimeStamp}.metadata", sb.ToString());
+            }
+
+            public ValueTuple<string, string> GenerateCorruptParameterDoc()
+            {
+                return ($"{_extension}metadata_{_dateTimeStamp}.metadata",
+                    @"<?xml version=""1.0"" encoding =""utf -8"" ?><corrupted_XML></corrupted_XML>");
+            }
+
+            public ValueTuple<string, string> GenerateFilelessParameterDoc()
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine(@"<?xml version=""1.0"" encoding=""utf-8""?>");
+                sb.AppendLine(@"<section name=""CAD Model Report"">");
+                sb.AppendLine($@"   <file role=""subject"" created=""2020-03-13T21:19:18Z"" appVersion=""2020.1"" mimetype=""application/ansys-scdoc"" />");
+                sb.AppendLine($@"   <file src=""{ThumbnailFile}"" role=""content"" name=""CAD Model"" mimetype=""image/png"" />");
+                sb.AppendLine("</section>");
+
+                return ($"{_extension}metadata_{_dateTimeStamp}.metadata", sb.ToString());
+            }
+
+            public string GetUpdatedMetadataContent()
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine(@"<?xml version=""1.0"" encoding=""utf-8""?>");
+                sb.AppendLine(@"<section name=""Test-data"" id=""DCF5C648CC5242C0B0F2F6E0B7BF4D93"">");
+                sb.AppendLine($@"   <section name=""TestData"" label=""Test-data"" role=""Setup"" id=""12BD5C2C528F4EFAB0AC687153D64F87"">");
+                sb.AppendLine($@"       <boolean name=""Test"" label=""Test-data"" value=""1"" id=""D14E544E4B1445658F865AAC7BCE58A8""/>");
+                sb.AppendLine("     </section>");
+                sb.AppendLine("</section>");
+
+                return sb.ToString();
+            }
+            public void CreateLocalData(ITestContext context, int skipDependencyCount = 0)
+            {
+                context.CreateLocalFile(new FileSize(10, BinaryPrefix.B), ViewableFile);
+                context.CreateLocalFile(new FileSize(10, BinaryPrefix.B), ThumbnailFile);
+                context.CreateLocalFile(new FileSize(10, BinaryPrefix.B), NativeInputFile);
+
+                foreach (var dependentFile in DependentFiles.Skip(skipDependencyCount))
+                    context.CreateLocalFile(new FileSize(10, BinaryPrefix.B), dependentFile);
+
+                if (!string.IsNullOrEmpty(DataChildFile))
+                    context.CreateLocalFile(new FileSize(10, BinaryPrefix.B), DataChildFile);
+            }
+
+            public static void CreateLocalData(ITestContext context, string fileName, string content)
+            {
+                context.CreateLocalFile(new FileSize(10, BinaryPrefix.B), fileName, content);
+            }
+
+        }
+    }
+}

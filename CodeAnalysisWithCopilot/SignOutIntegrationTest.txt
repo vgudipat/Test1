@@ -1,0 +1,60 @@
+using CliWrap.Buffered;
+using CliWrap;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Xunit;
+using Xunit.Abstractions;
+using Ansys.Minerva.IntegrationFramework.SdkImpl;
+
+namespace Ansys.Minerva.CmdTest.ClaimTest
+{
+	[Collection("Serial")]
+    public class SignOutIntegrationTest
+    {
+        private readonly ITestOutputHelper _output;
+
+        public SignOutIntegrationTest(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+        [Fact]
+        public async Task TestSignOut()
+        {
+            await using (var context = new TestContext(_output, $"TestClaimFolderWithRemoteOption"))
+            {
+                var _connection = await context.Connect();
+                Assert.NotNull(_connection);
+                var res = await context.RunProcess("sign-out", "-u", context.Url.ToString(), "--output", "stream://stdout");
+                try
+                {
+                    await RunProcess("download", "-u", context.Url.ToString(), "-r", $"/Data/", "-l", context.TestDataDirectory);
+                    Assert.True(false, "Sign out failed. Download got completed post sign-out command execution.");
+                }
+                catch (Exception ex)
+                {
+                    Assert.Contains("Signing in on the console is not supported with the authentication mode", ex.Message);
+                }
+                var cmdOutput = JsonSerializer.Deserialize<CommandOutputData>(res.StandardOutput.ToString());
+                Utils.VerifyGeneralRemoteCommandOutput(cmdOutput, Path.GetFullPath(Environment.CurrentDirectory), _connection);
+            }
+        }
+
+        private async Task<BufferedCommandResult> RunProcess(params string[] args)
+        {
+            var cliExecutable = "AnsysMinerva_CLI.exe";
+            var result = await Cli.Wrap(Path.Combine(Environment.CurrentDirectory, OperatingSystem.IsLinux() ? Path.GetFileNameWithoutExtension(cliExecutable) : cliExecutable))
+                .WithArguments(args)
+                .WithEnvironmentVariables(new Dictionary<string, string?>()
+                {
+                    { "ANS_MINERVA_INTERACTIVE", "console" },
+                    { "ANS_MINERVA_LOGFILE", "stream://stderr" }
+                })
+                .ExecuteBufferedAsync();
+            return result;
+        }
+    }
+}

@@ -1,0 +1,77 @@
+﻿using System;
+using System.IO;
+
+namespace Ansys.Minerva.CmdTest
+{
+    public class RandomStream : Stream
+    {
+        private readonly byte[] _header = Guid.NewGuid().ToByteArray();
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => true;
+
+        public override bool CanWrite => false;
+
+        public override long Length { get; }
+
+        public override long Position { get; set; }
+
+        public RandomStream(long size)
+        {
+            Length = size;
+        }
+
+        public override void Flush()
+        {
+            // Do nothing
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var length = Math.Max(0, Math.Min(count, (int)(Length - Position)));
+
+            if (length > 0)
+            {
+                var zeros = length;
+                if (Position < _header.Length)
+                {
+                    var headerRemaining = Math.Min(count, (int)(_header.Length - Position));
+                    Array.Copy(_header, (int)Position, buffer, offset, headerRemaining);
+                    Position += headerRemaining;
+                    zeros -= headerRemaining;
+                    offset += headerRemaining;
+                }
+
+                if (zeros > 0)
+                {
+                    Array.Clear(buffer, offset, zeros);
+                    Position += zeros;
+                }
+            }
+
+            return length;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            if (origin == SeekOrigin.Begin)
+                Position = offset;
+            else if (origin == SeekOrigin.Current)
+                Position += offset;
+            else
+                Position = Length + offset;
+            return Position;
+        }
+
+        public override void SetLength(long value)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            throw new NotSupportedException();
+        }
+    }
+}

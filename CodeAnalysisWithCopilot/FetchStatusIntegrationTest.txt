@@ -1,0 +1,169 @@
+using System.Text.Json;
+using System.Threading.Tasks;
+using System;
+using Xunit;
+using Xunit.Abstractions;
+using System.Linq;
+using System.IO;
+using System.Text.RegularExpressions;
+using System.IO.Abstractions;
+using Ansys.Minerva.IntegrationFramework.SdkImpl;
+using Ansys.Minerva.Sdk;
+using System.Collections.Generic;
+
+namespace Ansys.Minerva.CmdTest.FetchStatusTests
+{
+    [Collection("Serial")]
+    public class FetchStatusIntegrationTest
+    {
+        private ITestOutputHelper _output;
+        public FetchStatusIntegrationTest(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+        [Theory]
+        [InlineData("output.json")]
+        [InlineData("stream://stdout")]
+        [InlineData("stream://stderr")]
+        public async Task TestFetchStatusWithStdoutAndJson(string outputOption)
+        {
+            await using (var context = new TestContext(_output, nameof(TestFetchStatusWithStdoutAndJson)))
+            {
+                string fileName = context.CreateLocalData(new FileSize(10, BinaryPrefix.B));
+                string folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                await context.RunProcess("upload", "-n", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory);
+                var res = await context.RunProcess("fetch-status", "-u", context.Url.ToString(), "-l", context.TestDataDirectory, "--output", outputOption);
+                string? outputString = null;
+                if (string.Equals(outputOption, "output.json"))
+                {
+                    using StreamReader r = new StreamReader(outputOption);
+                    outputString = r.ReadToEnd();
+                }
+                else if (string.Equals(outputOption, "stream://stderr"))
+                {
+                    var stdErr = res.StandardError;
+                    outputString = stdErr.Split("##", StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).FirstOrDefault(x => x.IsOutputJsonObject());
+                }
+                else
+                    outputString = res.StandardOutput.ToString();
+                var connection = await context.Connect();
+                ValidateCommandOutput(outputString, context.TestDataDirectory, connection, fileName, folderName);
+            }
+        }
+
+        [Fact]
+        public async Task TestFetchStatusWithGlobOption()
+        {
+            await using (var context = new TestContext(_output, nameof(TestFetchStatusWithGlobOption)))
+            {
+                context.CreateMultiTypeFileStructure();
+                string folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                await context.RunProcess("upload", "-n", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory);
+                var res = await context.RunProcess("fetch-status", "-u", context.Url.ToString(), "-l", context.TestDataDirectory, "-g", "**/*.mtext", "--output", "stream://stdout");
+                var connection = await context.Connect();
+                ValidateCommandOutput(res.StandardOutput, context.TestDataDirectory, connection, "sample.mtext", $"{folderName}", "parent/child", null, "0");
+            }
+        }
+
+        [Fact]
+        // The .minervaignore file shouldn't have an effect on the files shown in fetch-status
+        public async Task TestFetchStatusWithMinervaIgnore()
+        {
+            await using (var context = new TestContext(_output, nameof(TestFetchStatusWithGlobOption)))
+            {
+                context.CreateMultiTypeFileStructure();
+                List<string> minervaIgnoreList = new List<string>
+                {
+                    "**/*.mtext"
+                };
+                context.CreateMinervaIgnoreFile(minervaIgnoreList);
+                string folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                await context.RunProcess("upload", "-n", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory, "--override-minervaignore"); // bypassing .minervaignore in upload
+                var res = await context.RunProcess("fetch-status", "-u", context.Url.ToString(), "-l", context.TestDataDirectory, "-g", "**/*.mtext", "--output", "stream://stdout");
+                var connection = await context.Connect();
+                ValidateCommandOutput(res.StandardOutput, context.TestDataDirectory, connection, "sample.mtext", $"{folderName}", "parent/child", null, "0", true);
+            }
+        }
+
+        [Fact]
+        public async Task TestFetchStatusForFileWithRevision()
+        {
+            await using (var context = new TestContext(_output, nameof(TestFetchStatusWithGlobOption)))
+            {
+                string fileName = context.CreateLocalData(new FileSize(10, BinaryPrefix.B));
+                string folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory);
+                var connection = await context.Connect();
+
+                var res = await context.RunProcess("fetch-status", "-u", context.Url.ToString(), "-l", context.TestDataDirectory, "--output", "stream://stdout");
+                ValidateCommandOutput(res.StandardOutput, context.TestDataDirectory, connection, fileName, folderName);
+
+                var filePath = context.TestDataDirectory + "/" + fileName;
+                ModifyExistingLocalFile(filePath);
+                var newFileSize = new FileInfo(filePath).Length.ToString();
+                await context.RunProcess("upload", "-c", "-u", context.Url.ToString(),
+                                          "-r", $"/Data/{folderName}/",
+                                          "-l", context.TestDataDirectory,
+                                          "-o Overwrite");
+                var res1 = await context.RunProcess("fetch-status", "-u", context.Url.ToString(), "-l", context.TestDataDirectory, "--output", "stream://stdout");
+                ValidateCommandOutput(res1.StandardOutput, context.TestDataDirectory, connection, fileName, folderName, null, null, newFileSize);
+            }
+        }
+
+        private void ModifyExistingLocalFile(string FilePath)
+        {
+            FileStream fs = new FileStream(FilePath, FileMode.Open, FileAccess.ReadWrite);
+            fs.Seek(0, SeekOrigin.End);
+            StreamWriter w = new StreamWriter(fs);
+            w.WriteLine("Modified Content!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            w.Close();
+            fs.Close();
+        }
+
+        private static void ValidateCommandOutput(string? json, string workingDir, HttpConnection connection, string fileName, string folderName, string? dirStructure = null, string? revision = null, string? fileSize = null, bool ignore = false)
+        {
+            Assert.NotNull(json);
+            var cmdOutput = JsonSerializer.Deserialize<CommandOutputData>(json);
+            Assert.NotNull(cmdOutput);
+            Assert.NotNull(cmdOutput.Items);
+            foreach (var item in cmdOutput.Items)
+            {
+                if (item.Local != null)
+                {
+                    Assert.NotNull(item);
+                    Assert.NotNull(item.Local);
+                    Assert.False(item.Local.Staged);
+                    if (ignore)
+                        Assert.Equal("Ignored", item.Local.Status);
+                    else
+                        Assert.Equal("NoChange", item.Local.Status);
+                }
+                if (item.Remote != null)
+                {
+                    Assert.NotNull(item);
+                    Assert.NotNull(item.Remote);
+                    Assert.Equal(dirStructure == null ? $"/Data/{folderName}/{fileName}" : $"/Data/{folderName}/{dirStructure}/{fileName}", item.Remote.Path);
+                    Assert.Equal(revision ?? "001", item.Remote.Revision);
+                    Assert.Equal("Default", item.Remote.Branch);
+                    Assert.Equal(fileName.EndsWith(".mtext") ? "application/octet-stream" : "text/plain", item.Remote.MimeType);
+                    Assert.Equal(fileSize ?? "10", item.Remote.Size);
+                    Assert.True(item.Remote.IsLatest);
+                    Assert.Equal("In Work", item.Remote.LifeCycleState);
+                    if (item.Remote.LockedById != null)
+                    {
+                        Assert.Equal(ClaimStatus.NotClaimed.ToString(), item.Remote.LockedById.Status);
+                        Assert.Equal(string.Empty, item.Remote.LockedById.KeyedName);
+                        Assert.Equal(string.Empty, item.Remote.LockedById.Id);
+                    }
+                }
+            }
+            Utils.VerifyGeneralRemoteCommandOutput(cmdOutput, workingDir, connection);
+        }
+
+    }
+}

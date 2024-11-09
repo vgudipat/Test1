@@ -1,0 +1,199 @@
+﻿using Ansys.Minerva.IntegrationFramework.Common.Env;
+using Ansys.Minerva.IntegrationFramework.Common.Persistence;
+using Ansys.Minerva.IntegrationFramework.SdkImpl;
+using Ansys.Minerva.Sdk;
+using CliWrap.Buffered;
+using System;
+using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
+using System.IO;
+using System.IO.Abstractions.TestingHelpers;
+using System.Linq;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace Ansys.Minerva.CmdTest.Get_Local
+{
+    public class Get_Local_IntegrationTest
+    {
+        private ITestOutputHelper _output;
+
+        public Get_Local_IntegrationTest(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+        [Fact]
+        public async Task TestGetLocalForFolderAndFilePath()
+        {
+            await using (var context = new TestContext(_output, nameof(TestGetLocalForFolderAndFilePath)))
+            {
+                await CreateLocalAndRemoteData(context);
+
+                await TestGetLocalForFilePath(context); //FilePath
+                await TestGetLocalForFolderPath(context); //FolderPath
+            }
+        }
+
+        [Fact]
+        public async Task TestGetLocal_NoLocalDirectoryFound()
+        {
+            await using (var context = new TestContext(_output, nameof(TestGetLocal_NoLocalDirectoryFound)))
+            {
+                var filename = context.CreateLocalData(new FileSize(10, BinaryPrefix.B));
+
+                //Run Get-Local
+                var path = Path.Combine(context.TestDataDirectory, filename);
+                try
+                {
+                    var output = await context.RunProcess("get-local", "-p", path, "--output", Path.Combine(context.TestDataDirectory, "get-local-output.json"));
+                    Assert.True(false, "Expected an exception to be thrown due to no local directory found.");
+                }
+                catch (Exception exception)
+                {
+                    var ex = new ValidationException("No working directory information found for the specified file or folder.");
+                    ValidateErrorOutput(ex, Path.Combine(context.TestDataDirectory, "get-local-output.json"));
+                }
+                finally
+                {
+                    if (Directory.Exists(Path.Combine(Environment.CurrentDirectory, ".minerva")))
+                        Directory.Delete(Path.Combine(Environment.CurrentDirectory, ".minerva"), true);
+                }
+            }
+        }
+
+        [Fact]
+        public async Task TestGetLocal_InvalidPath()
+        {
+            await using (var context = new TestContext(_output, nameof(TestGetLocal_InvalidPath)))
+            {
+                context.CreateLocalTestFolder();
+                var path = Path.Combine(context.TestDataDirectory, "InvalidPath");
+                try
+                {
+                    var output = await context.RunProcess("get-local", "-p", path, "--output", Path.Combine(context.TestDataDirectory, "get-local-output.json"));
+                    Assert.True(false, "Expected an exception to be thrown due to an invalid path.");
+                }
+                catch (Exception exception)
+                {
+                    var ex = new ArgumentException("Provided path does not exist: " + path);
+                    ValidateErrorOutput(ex, Path.Combine(context.TestDataDirectory, "get-local-output.json"));
+                }
+                finally
+                {
+                    if (Directory.Exists(Path.Combine(Environment.CurrentDirectory, ".minerva")))
+                        Directory.Delete(Path.Combine(Environment.CurrentDirectory, ".minerva"), true);
+                }
+            }
+        }
+
+        #region Helper Methods
+
+        private async Task CreateLocalAndRemoteData(TestContext context)
+        {
+            context.CreateNestedFolderStructure();
+
+            string folderName = DateTime.UtcNow.ToString("_yyMMddHHmmss");
+            context.CreateRemoteTestFolderAsync(folderName).Wait();
+
+            //Run upload command, this will create .minerva under this path: context.TestDataDirectory/Folder1/Folder1.1/Folder1.1.1
+            await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", Path.Combine(context.TestDataDirectory, "Folder1", "Folder1.1", "Folder1.1.1"), "--output", "stream://stdout");
+
+            // Run the upload command again, this will create .minevra folder under this path : context.TestDataDirectory/Folder1
+            await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", Path.Combine(context.TestDataDirectory, "Folder1"), "--output", "stream://stdout");
+
+        }
+
+        private async Task TestGetLocalForFilePath(TestContext context)
+        {
+            await TestGetLocalForProvidedPath(Path.Combine(context.TestDataDirectory, "Folder1", "Folder1.1", "Folder1.1.1", "TextFile1.1.1.1.txt"), Path.Combine(context.TestDataDirectory, "Folder1", "Folder1.1", "Folder1.1.1", ".minerva"), "TextFile1.1.1.1.txt", context);
+        }
+        private async Task TestGetLocalForFolderPath(TestContext context)
+        {
+            await TestGetLocalForProvidedPath(Path.Combine(context.TestDataDirectory, "Folder1", "Folder1.1", "Folder1.1.2"), Path.Combine(context.TestDataDirectory, "Folder1", ".minerva"), "Folder1.1/Folder1.1.2", context);
+        }
+
+        private async Task TestGetLocalForProvidedPath(string path, string minervaDirPath, string fileSyncKey, TestContext context)
+        {
+            try
+            {
+                string testDataDirectory = context.TestDataDirectory;
+
+                // Mock file system
+                var Files = Directory.GetFiles(context.TestDataDirectory, "*", SearchOption.AllDirectories);
+                var mockFileDir = Files.ToDictionary(
+                    x => x,
+                    x => new MockFileData(File.ReadAllText(x)));
+                MockFileSystem mockFileSystem = new MockFileSystem(mockFileDir);
+
+                var output = await context.RunProcess("get-local", "-p", path, "--output", "stream://stdout");
+
+                var fileSyncStore = new JsonFileSyncStore(mockFileSystem.FileSystem, path: minervaDirPath);
+                ValidateOutput(output, fileSyncStore.Data.WorkingDir, fileSyncStore.Data.Index[fileSyncKey]);
+            }
+            finally
+            {
+                if (Directory.Exists(Path.Combine(Environment.CurrentDirectory, ".minerva")))
+                    Directory.Delete(Path.Combine(Environment.CurrentDirectory, ".minerva"), true);
+            }
+
+        }
+        private void ValidateOutput(BufferedCommandResult result, string expectedLocalPath, FileIndex jsonFileSyncStore)
+        {
+            Assert.NotNull(result.StandardOutput);
+            var cmdOutput = JsonSerializer.Deserialize<CommandOutputData>(result.StandardOutput.ToString());
+            Assert.NotNull(cmdOutput);
+
+            var localWorkingDir = cmdOutput.Local;
+            Assert.NotNull(localWorkingDir);
+            Assert.Equal(localWorkingDir, expectedLocalPath);
+
+            var items = cmdOutput.Items;
+            Assert.NotNull(items);
+            Assert.Single(items);
+            var item = items[0];
+
+            Assert.Equal(item.IsDirectory, jsonFileSyncStore.IsDirectory);
+
+            //Validate Remote data
+            Assert.NotNull(item.Remote);
+
+            Assert.Equal(Path.GetFileName(jsonFileSyncStore.Path), item.Remote.Name);
+
+            Assert.Equal(jsonFileSyncStore.Location, item.Remote.Locator);
+
+            Assert.Equal(jsonFileSyncStore.Revision, item.Remote.Revision ?? string.Empty);
+
+            Assert.Equal(jsonFileSyncStore.Branch, item.Remote.Branch ?? string.Empty);
+
+            if (!jsonFileSyncStore.IsDirectory)
+            {
+                Assert.NotNull(jsonFileSyncStore.Modified);
+                Assert.Equal(item.Remote.ModifiedOn, jsonFileSyncStore.Modified.Value.ToString("yyyy-mm-ddThh:mm:sszzz"));
+                Assert.Equal(jsonFileSyncStore.Size.ToString(), item.Remote.Size);
+            }
+
+            //Validate Local data
+            var local = item.Local;
+            Assert.NotNull(local);
+            Assert.Equal(jsonFileSyncStore.Path, local.Path);
+            Assert.Equal(PathStatusType.NoChange.ToString(), local.Status);
+            Assert.False(local.Staged);
+            Utils.VerifyGeneralLocalCmdOutput(cmdOutput, expectedLocalPath);
+        }
+        private void ValidateErrorOutput(Exception ex, string outputJsonPath)
+        {
+            var cmdOutput = JsonSerializer.Deserialize<CommandOutputData>(File.ReadAllText(outputJsonPath));
+            Assert.NotNull(cmdOutput);
+            var error = cmdOutput.Error;
+            Assert.NotNull(error);
+            Assert.NotNull(ex);
+            Assert.Equal(ex.GetType().Name, error.Type);
+            Assert.Equal(ex.Message, error.Message);
+        }
+
+        #endregion
+    }
+}

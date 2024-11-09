@@ -1,0 +1,49 @@
+﻿using Ansys.Minerva.IntegrationFramework.Common;
+using Ansys.Minerva.IntegrationFramework.Common.Commands;
+using Xunit;
+
+namespace Ansys.Minerva.CmdTest.UtilityClass
+{
+	public class UtilityClassUnitTest
+	{
+		[Theory]
+        [InlineData(CommandMode.HomeCommand, @"ansrun://download?url=http://localhost/AnsysMinerva&local=D:\test")]
+		[InlineData(CommandMode.HomeCommand, @"ansrun:download?url=http://localhost/AnsysMinerva&local=D:\test")]
+		[InlineData(CommandMode.HomeCommand, @"minerva://download?url=http://localhost/AnsysMinerva&local=D:\test")]
+		[InlineData(CommandMode.HomeCommand, @"minerva:download?url=http://localhost/AnsysMinerva&local=D:\test")]
+		[InlineData(CommandMode.HomeCommand, @"aa://download?url=http://localhost/AnsysMinerva&local=D:\test")]
+		[InlineData(CommandMode.HomeCommand, @"aa:download?url=http://localhost/AnsysMinerva&local=D:\test")]
+		[InlineData(CommandMode.CLICommand, @"aa:download?url=http://localhost/AnsysMinerva&local=D:\test", "next-command-option")]
+		[InlineData(CommandMode.CLICommand, @"download", "url", "http://localhost/AnsysMinerva&local")]
+		public void TestCommandMode(CommandMode commandMode, params string[] args)
+		{
+			//arrange
+
+			//act
+			CommandMode commandModeOutput = Utility.FindCommandMode(args);
+
+			//assert
+			Assert.Equal(commandMode, commandModeOutput);
+
+		}
+
+		[Theory]
+		[InlineData(@"minerva://download?url=http://localhost/AnsysMinerva&local=D:\test", "download", "--url", "http://localhost/AnsysMinerva", "--local", @"D:\test")]
+		[InlineData(@"minerva:download?url=http://localhost/AnsysMinerva&local=D:\test", "download", "--url", "http://localhost/AnsysMinerva", "--local", @"D:\test")]
+        [InlineData(@"aa://download?url=http://localhost/AnsysMinerva&local=D:\test", "download", "--url", "http://localhost/AnsysMinerva", "--local", @"D:\test")]
+		[InlineData(@"aa:download?url=http://localhost/AnsysMinerva&local=D:\test", "download", "--url", "http://localhost/AnsysMinerva", "--local", @"D:\test")]
+		[InlineData(@"minerva://download?url=http://localhost/AnsysMinerva&local=D:\test&remote=/Data/test1,/Data/test2", "download", "--url", "http://localhost/AnsysMinerva", "--local", @"D:\test", "--remote", "/Data/test1", "/Data/test2")]
+		[InlineData(@"minerva://download?url=http://localhost/AnsysMinerva&local=D:\test&auth:mode=Explicit", "download", "--url", "http://localhost/AnsysMinerva", "--local", @"D:\test", "--auth:mode", "Explicit")]
+		public void TestHomeCommandParser(string url, params string[] args)
+		{
+			//arrange
+
+			//act
+			string[] outputArgs = Utility.ParseHomeCommandURL(url);
+
+			//assert
+			Assert.Equal(args, outputArgs);
+
+		}
+	}
+}

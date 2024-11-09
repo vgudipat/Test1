@@ -1,0 +1,26 @@
+﻿using System.Runtime.InteropServices;
+using Xunit;
+
+namespace Ansys.Minerva.CmdTest
+{
+    public class IgnoreForLinuxFactAttribute : FactAttribute
+    {
+        public IgnoreForLinuxFactAttribute()
+        {
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                Skip = "Ignored for non Windows platform";
+            }
+        }
+	}
+	public class IgnoreForLinuxTheoryAttribute : TheoryAttribute
+	{
+		public IgnoreForLinuxTheoryAttribute()
+		{
+			if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+			{
+				Skip = "Ignored for non Windows platform";
+			}
+		}
+	}
+}

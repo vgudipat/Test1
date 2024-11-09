@@ -1,0 +1,161 @@
+﻿using System;
+using System.Threading.Tasks;
+using Xunit;
+using Xunit.Abstractions;
+using System.Text.Json;
+using System.Collections.Generic;
+using System.Linq;
+using System.IO;
+using Ansys.Minerva.Sdk;
+using Ansys.Minerva.IntegrationFramework.SdkImpl;
+
+namespace Ansys.Minerva.CmdTest.SelectItemsTest
+{
+    [Collection("Serial")]
+    public class SelectItemsIntegrationTest
+    {
+        private readonly ITestOutputHelper _output;
+
+        public SelectItemsIntegrationTest(ITestOutputHelper output)
+        {
+            _output = output;
+        }
+
+        private static void ValidateSelectItemCommandOutput(string json, string fileName, string folderName, TestContext context, HttpConnection connection, List<string>? relatedItems = null)
+        {
+            Assert.NotNull(json);
+            var cmdOutput = JsonSerializer.Deserialize<CommandOutputData>(json);
+            Assert.NotNull(cmdOutput);
+            Assert.NotNull(cmdOutput.Items);
+            if (relatedItems==null)
+                Assert.Equal(2, cmdOutput.Items.Count);
+            else
+                Assert.Single(cmdOutput.Items);
+            ValidateItems(cmdOutput.Items, new List<string> { fileName }, folderName);
+
+            if (relatedItems == null)
+                return;
+            Assert.NotNull(cmdOutput.RelatedItems);
+            Assert.Equal(cmdOutput.RelatedItems.Count, relatedItems.Count);
+            ValidateItems(cmdOutput.RelatedItems, relatedItems, folderName);
+            Utils.VerifyGeneralRemoteCommandOutput(cmdOutput, Path.GetFullPath(context.TestDataDirectory), connection);
+        }
+
+        private static void ValidateItems(List<SelectMetaData> items, List<string> fileNames, string folderName)
+        {
+            foreach (var item in items)
+            {
+                Assert.NotNull(item);
+                Assert.NotNull(item.Remote);
+                Assert.NotNull(item.Remote.Name);
+                Assert.Equal("001", item.Remote.Revision);
+                if (item.IsDirectory)
+                {
+                    Assert.Equal(folderName, item.Remote.Name);
+                    Assert.Matches("^Ans_Data/[a-zA-z0-9]{32}$", item.Remote.Locator);
+                    Assert.Equal($"/Data/{folderName}", item.Remote.Path);
+                }
+                else
+                {
+                    Assert.Contains(item.Remote.Name, fileNames);
+                    Assert.Matches("^Ans_Data/[a-zA-z0-9]{32}/local_file$", item.Remote.Locator);
+                    Assert.Equal("text/plain", item.Remote.MimeType);
+                    Assert.Equal("10", item.Remote.Size);
+                    Assert.Matches("[a-zA-Z0-9]{0,32}", item.Remote.Checksum);
+                    if(item.Remote.Name.Contains("Child"))
+                        Assert.Equal($"/Data/{item.Remote.Name}", item.Remote.Path);
+                    else
+                        Assert.Equal($"/Data/{folderName}/{item.Remote.Name}", item.Remote.Path);
+                }
+            }
+        }
+
+        [Fact]
+        public async Task TestSelectItemForFileFolderWithStdout()
+        {
+            await using (var context = new TestContext(_output, $"TestSelectItemForFileFolderWithStdout"))
+            {
+                string fileName = context.CreateLocalData(new FileSize(10, BinaryPrefix.B));
+                string folderName = "_" + DateTime.UtcNow.ToString("yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory);
+                var connection = await context.Connect();
+                var res = await context.RunProcess("select-items", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/{fileName}", $"/Data/{folderName}", "--output", "stream://stdout", "--mode", "SelectFile");
+                ValidateSelectItemCommandOutput(res.StandardOutput.ToString(), fileName, folderName, context, connection);
+            }
+        }
+
+        [Fact]
+        public async Task TestSelectItemForFileFolderWithJsonOutput()
+        {
+            await using (var context = new TestContext(_output, $"TestSelectItemForFileFolderWithJsonOutput"))
+            {
+                string fileName = context.CreateLocalData(new FileSize(10, BinaryPrefix.B));
+                string folderName = "_" + DateTime.UtcNow.ToString("yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory);
+                var connection = await context.Connect();
+                var res = await context.RunProcess("select-items", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/{fileName}", $"/Data/{folderName}", "--output", $"{context.TestDataDirectory}/test.json", "--mode", "SelectFile");
+                using (StreamReader r = new StreamReader($"{context.TestDataDirectory}/test.json"))
+                {
+                    string jsonString = r.ReadToEnd();
+                    ValidateSelectItemCommandOutput(jsonString, fileName, folderName, context, connection);
+                }
+            }
+        }
+
+        [Fact]
+        public async Task TestSelectItemForFolder()
+        {
+            await using (var context = new TestContext(_output, $"TestSelectItemForFolder"))
+            {
+                string fileName = context.CreateLocalData(new FileSize(10, BinaryPrefix.B));
+                string folderName = "_" + DateTime.UtcNow.ToString("yyMMddHHmmss");
+                await context.CreateRemoteTestFolderAsync(folderName);
+                await context.RunProcess("upload", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}/", "-l", context.TestDataDirectory);
+                var connection = await context.Connect();
+                var res = await context.RunProcess("select-items", "-u", context.Url.ToString(), "-r", $"/Data/{folderName}", "--output", "stream://stdout", "--mode", "SelectFolder", "-l", context.TestDataDirectory);
+                ValidateSelectItemCommandOutput(res.StandardOutput.ToString(), fileName, folderName, context, connection, new List<string> { fileName });
+            }
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task TestSelectItemForFolderWithDependency(bool withDependencyOption)
+        {
+            await using (var _context = new TestContext(_output, $"TestSelectItemForFolderWithDependency"))
+            {
+                // Create Remote Data - Main file, Child file
+                var folderItem = await _context.CreateRemoteTestFolderAsync("_" + DateTime.UtcNow.ToString("yyMMddHHmmss"));
+                var mainFileItem = _context.CreateRemoteData(new FileSize(10, BinaryPrefix.B), "MainFile.txt");
+                var childFileItem = _context.CreateRemoteData(new FileSize(10, BinaryPrefix.B), "ChildFile.txt");
+                var folderView = new FolderViewModel(await _context.Connect());
+                await folderView.TryNavigateToDefaultAsync();
+                await folderView.TryNavigateToAsync(folderItem);
+                await folderView.UploadFilesAsync(new[] { mainFileItem }, overwrite: _ => OverwriteMode.Overwrite);
+                var files = (await folderView.GetFileSystemItemsAsync()).ToList();
+                files[0].Container.TryGetId(out _, out string mainFileId);
+                await folderView.TryNavigateToDefaultAsync();
+                await folderView.UploadFilesAsync(new[] { childFileItem }, overwrite: _ => OverwriteMode.Overwrite);
+                var files1 = (await folderView.GetFileSystemItemsAsync()).ToList();
+                var child = files1.FirstOrDefault(x => string.Equals(x.Name, childFileItem.Name));
+                Assert.NotNull(child);
+                child.Container.TryGetId(out _, out string childFileId);
+                // Establish dependency - Main file->Child file
+                var connection = await _context.Connect();
+                await _context.CreateDependency(connection, mainFileId, childFileId);
+                List<string> cmdOptions = new List<string> { "select-items", "-u", _context.Url.ToString(), "-r", $"/Data/{folderItem.Name}", "-l", _context.TestDataDirectory, "--output", "stream://stdout", "--mode", "SelectFolder" };
+                if (withDependencyOption)
+                    cmdOptions.Add("-d");
+                //Download Main file with dependency
+                var result = await _context.RunProcess(cmdOptions.ToArray());
+                if(withDependencyOption)
+                    ValidateSelectItemCommandOutput(result.StandardOutput.ToString(), mainFileItem.Name, folderItem.Name, _context, connection, new List<string> { mainFileItem.Name, childFileItem.Name });
+                else
+                    ValidateSelectItemCommandOutput(result.StandardOutput.ToString(), mainFileItem.Name, folderItem.Name, _context, connection, new List<string> { mainFileItem.Name });
+            }
+        }
+    }
+
+}

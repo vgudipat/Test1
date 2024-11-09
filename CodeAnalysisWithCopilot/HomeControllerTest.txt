@@ -1,0 +1,259 @@
+﻿using Ansys.Minerva.Cmd.Controllers;
+using Ansys.Minerva.IntegrationFramework.Common.Contract;
+using Ansys.Minerva.IntegrationFramework.Common.Env;
+using Ansys.Minerva.IntegrationFramework.SdkImpl;
+using Ansys.Minerva.Sdk;
+using Microsoft.AspNetCore.SignalR;
+using Moq;
+using Newtonsoft.Json;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
+using Xunit;
+
+namespace Ansys.Minerva.CmdTest.ControllerTests
+{
+    public class HomeControllerTest : IClassFixture<MockSignalRClient>
+    {
+        public MockSignalRClient _mockSignalRClient { get; private set; }
+
+        public HomeControllerTest(MockSignalRClient mockSignalRClient)
+        {
+            _mockSignalRClient = mockSignalRClient;
+        }
+
+        #region Test to verify Get Home Directories
+        [Fact]
+        public async Task Test_GetChildrenDirectories_ShouldReturnHomeDrives()
+        {
+            // Arrange
+            var path = "";
+            var expectedResult = new Dictionary<string, List<BrowseUIDirectoryModel>>
+            {
+                { path, DriveInfo.GetDrives().Select(drive => new BrowseUIDirectoryModel { Path = NormalizePathSeparator(drive.Name), Hidden = false }).ToList() }
+            };
+
+            // Act
+            Dictionary<string, List<BrowseUIDirectoryModel>> actualResult = null;
+            _mockSignalRClient.hubClientsMock.Setup(c => c.All.OnChildrenDirectories(It.IsAny<Dictionary<string, List<BrowseUIDirectoryModel>>>()))
+                .Callback<Dictionary<string, List<BrowseUIDirectoryModel>>>(result => actualResult = result);
+
+            await _mockSignalRClient.homeController.GetChildrenDirectories(path);
+
+            // Assert
+            AssertResult(actualResult, expectedResult);
+        }
+        #endregion
+
+        #region Test to verify Get Children Directories
+        [Fact]
+        public async Task Test_GetChildrenDirectories_ShouldReturnChildDirectories()
+        {
+            try
+            {
+                //Arrange
+                var expectedChildDirectoriesList = CreateMockAndGetExpectedResult();
+
+                var expectedResult = new Dictionary<string, List<BrowseUIDirectoryModel>>
+                {
+                    { NormalizePathSeparator(_mockSignalRClient.HomeControllerTestDataDir), expectedChildDirectoriesList }
+                };
+
+                //Act
+                Dictionary<string, List<BrowseUIDirectoryModel>> actualResult = null;
+                _mockSignalRClient.hubClientsMock.Setup(c => c.All.OnChildrenDirectories(It.IsAny<Dictionary<string, List<BrowseUIDirectoryModel>>>()))
+                    .Callback<Dictionary<string, List<BrowseUIDirectoryModel>>>(result => actualResult = result);
+
+                await _mockSignalRClient.homeController.GetChildrenDirectories(_mockSignalRClient.HomeControllerTestDataDir);
+
+                // Assert
+                AssertResult(actualResult, expectedResult);
+            }
+            finally
+            {
+                ClearData();
+            }
+        }
+        #endregion
+
+        #region Test to validate erros if Invalid path is provided to GetChildrenDirectories
+        [Theory]
+        [MemberData(nameof(InvalidPathCases))]
+        public async Task Test_GetChildrenDirectories_ShouldReturnError(Dictionary<string, string> invalidPath)
+        {
+            string errorMsg = null;
+
+            // Act
+            _mockSignalRClient.hubClientsMock.Setup(c => c.All.OnError(It.IsAny<string>()))
+                .Callback<string>(result => errorMsg = result);
+
+            await _mockSignalRClient.homeController.GetChildrenDirectories(invalidPath["Path"]);
+
+            // Assert
+            Assert.NotNull(errorMsg);
+            Assert.Equal(invalidPath["ErrorMessage"], errorMsg);
+        }
+        #endregion
+
+        #region Test to verify GetDefaultPath
+        [Fact]
+        public async Task Test_GetDefaultPath_ShouldReturnUserProfile()
+        {
+            // Arrange
+            var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var expectedDefaultPath = NormalizePathSeparator(userProfile);
+
+            // Act
+            var actualDefaultPath = string.Empty;
+            _mockSignalRClient.hubClientsMock.Setup(c => c.All.OnDefaultPath(It.IsAny<string>())).Callback<string>(result => actualDefaultPath = result); ;
+            await _mockSignalRClient.homeController.GetDefaultPath();
+
+            // Assert
+            Assert.Equal(expectedDefaultPath, actualDefaultPath);
+        }
+        #endregion
+
+        #region Test to verify CreateDirectoryMetadata
+        [Fact]
+        public void CreateDirectoryMetadata_ShouldReturnHomeDirectoryMetadata()
+        {
+            // Arrange
+            var paths = new List<string> { "C:\\", "D:\\" };
+
+            var expectedResult = new List<BrowseUIDirectoryModel>
+            {
+                  new BrowseUIDirectoryModel{ Path = "C:\\", Hidden = false}, new BrowseUIDirectoryModel{ Path = "D:\\", Hidden = false}
+            };
+
+            // Act
+            var actualResult = _mockSignalRClient.homeController.CreateDirectoryMetadata(paths, true);
+
+            // Assert
+            AssertResult(actualResult, expectedResult);
+        }
+
+        [Fact]
+        public void CreateDirectoryMetadata_ShouldReturnDirMetadata()
+        {
+
+            try
+            {
+                //Arrange
+                var  expectedResult = CreateMockAndGetExpectedResult();
+
+                // Act
+                var actualResult = _mockSignalRClient.homeController.CreateDirectoryMetadata(Directory.GetDirectories(_mockSignalRClient.HomeControllerTestDataDir).ToList());
+
+                // Assert
+                AssertResult(actualResult, expectedResult);
+            }
+            finally
+            {
+                ClearData();
+            }
+        }
+        #endregion
+
+        #region Helper Methods
+        private string NormalizePathSeparator(string path)
+        {
+            return path?.Replace("/", "\\");
+        }
+        public static IEnumerable<object[]> InvalidPathCases
+        {
+            get
+            {
+                var invalidPathCases = new List<Dictionary<string, string>>();
+
+                // Invalid Path Case 1
+                var invalidPath = new Dictionary<string, string>
+                {
+                    { "Path", "InvalidPathCase" },
+                    { "ErrorMessage", $"The specified path is invalid: InvalidPathCase" }
+                };
+                invalidPathCases.Add(invalidPath);
+
+                // Invalid Path Case 2
+                var nonExistingDirPath = $"{AppDomain.CurrentDomain.BaseDirectory}{Path.DirectorySeparatorChar}{Guid.NewGuid().ToArasId()}";
+                var nonExistingDir = new Dictionary<string, string>
+                {
+                    { "Path", nonExistingDirPath },
+                    { "ErrorMessage", $"The specified path is not found: {nonExistingDirPath}" }
+                };
+                invalidPathCases.Add(nonExistingDir);
+
+                return invalidPathCases.Select(caseData => new object[] { caseData });
+            }
+        }
+        private List<BrowseUIDirectoryModel> CreateMockAndGetExpectedResult()
+        {
+
+            if (!Directory.Exists(_mockSignalRClient.HomeControllerTestDataDir))
+                Directory.CreateDirectory(_mockSignalRClient.HomeControllerTestDataDir);
+            var testDirPath = Path.Combine(_mockSignalRClient.HomeControllerTestDataDir, "TestDir");
+            if (!Directory.Exists(testDirPath))
+                Directory.CreateDirectory(testDirPath);
+            var hiddenFolderPath = Path.Combine(_mockSignalRClient.HomeControllerTestDataDir, ".HiddenDir");
+            if (!Directory.Exists(hiddenFolderPath))
+            {
+                //Create Hidden directory to handle the use case of Hidden directory
+                DirectoryInfo di = Directory.CreateDirectory(hiddenFolderPath);
+                if(IsWindows())
+                di.Attributes = FileAttributes.Hidden;
+            }
+
+            return Directory.GetDirectories(_mockSignalRClient.HomeControllerTestDataDir).Select(dir => new BrowseUIDirectoryModel
+            {
+                Path = NormalizePathSeparator(dir),
+                Hidden = dir == hiddenFolderPath ? true : false
+            }).ToList();
+
+        }
+
+        private void ClearData()
+        {
+            if (Directory.Exists(_mockSignalRClient.HomeControllerTestDataDir))
+                Directory.Delete(_mockSignalRClient.HomeControllerTestDataDir, true);
+        }
+
+        private void AssertResult(List<BrowseUIDirectoryModel> actualResult, List<BrowseUIDirectoryModel> expectedResult)
+        {
+            Assert.NotNull(actualResult);
+            Assert.Equal(expectedResult.Count, actualResult.Count);
+            Assert.Equal(JsonConvert.SerializeObject(expectedResult), JsonConvert.SerializeObject(actualResult));
+        }
+        private void AssertResult(Dictionary<string, List<BrowseUIDirectoryModel>> actualResult, Dictionary<string, List<BrowseUIDirectoryModel>> expectedResult)
+        {
+            Assert.NotNull(actualResult);
+            Assert.Equal(expectedResult.Count, actualResult.Count);
+            Assert.Equal(JsonConvert.SerializeObject(expectedResult), JsonConvert.SerializeObject(actualResult));
+        }
+        private bool IsWindows()
+        {
+            return RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        }
+        #endregion
+
+    }
+
+    public class MockSignalRClient
+    {
+        public HomeController homeController { get;}
+        public Mock<IHubCallerClients<ILocalDirectoryClientHub>> hubClientsMock { get; }
+        public string HomeControllerTestDataDir { get; }
+        public MockSignalRClient() {
+            HomeControllerTestDataDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "HomeController_TestData");
+            var uiMock = new Mock<IUserInterface>();
+            hubClientsMock = new Mock<IHubCallerClients<ILocalDirectoryClientHub>>();
+            hubClientsMock.Setup(c => c.All).Returns(Mock.Of<ILocalDirectoryClientHub>());
+
+            homeController = new HomeController(uiMock.Object)
+            {
+                Clients = hubClientsMock.Object,
+            };
+        }
+    }
+}

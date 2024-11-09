@@ -1,0 +1,138 @@
+﻿using Ansys.Minerva.Sdk;
+using CliWrap;
+using CliWrap.Buffered;
+using Newtonsoft.Json.Linq;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading.Tasks;
+using Xunit.Abstractions;
+
+namespace Ansys.Minerva.CmdTest
+{
+    internal class UserContext : BaseTestContext
+    {
+        private readonly HttpConnection _adminConnection;
+        private HttpConnection? _userConnection;
+        private string? _username;
+        private string? _password;
+
+        public UserContext(ITestOutputHelper output, HttpConnection adminConnection, string testName): base(output, testName)
+        {
+            _adminConnection = adminConnection;
+        }
+
+        public override async Task<HttpConnection> Connect()
+        {
+            if (_userConnection != null)
+                return _userConnection;
+
+            var newUser = await CreateNewUser();
+
+            var identityId = newUser.Properties.Get("owned_by_id");
+
+            //Add newly created user to File Administrator identity list
+            var addFileAdminIdentity = (await _adminConnection.ExecuteAsync(Query.Aml((IFormattable)$@"
+                      <Item action='edit' type='Identity' id='4ACA79F318F7448A955AE595511AC789'>
+                        <Relationships>
+                          <Item action='add' type='Member'>
+                            <related_id>
+                              <Item type='Identity' action='get' id='{identityId}'/>
+                            </related_id>
+                          </Item>
+                        </Relationships>
+                      </Item>"))).AssertNoError();
+
+            _userConnection = new HttpConnection(_adminConnection.Url);
+            await _userConnection.LoginAsync(new ExplicitCredentials(_adminConnection.Session.Database, _username, _password));
+            return _userConnection;
+        }
+
+        public override async ValueTask DisposeAsync()
+        {
+            HashSet<JToken> fileIds = new HashSet<JToken>();
+            if (Directory.Exists(TestDataDirectory))
+            {
+                string fileSyncPath = Path.Combine(TestDataDirectory, ".minerva", "FileSync.json");
+                if (File.Exists(fileSyncPath)) 
+                {
+                    string source = await File.ReadAllTextAsync(fileSyncPath);
+                    fileIds = JObject.Parse(source).SelectTokens("$.Index.*.Id").ToHashSet();
+                }
+                Directory.Delete(TestDataDirectory, true);
+            }
+
+
+            if (_userConnection == null)
+                return;
+
+            if (_createdFolders.Count > 0)
+            {
+                var rootFolderView = new FolderViewModel(_userConnection);
+                await rootFolderView.TryNavigateToDefaultAsync();
+                await rootFolderView.DeleteAsync(_createdFolders);
+                if(fileIds.Count > 0)
+                {
+                    await _adminConnection.ExecuteAsync(Query.Aml((IFormattable)$"<Item type='File' action='delete' idlist='{string.Join("','", fileIds)}'/>"));
+                }
+                _createdFolders.Clear();
+            }
+
+            if (_userConnection != null)
+            {
+                var id = _userConnection.Session.UserId;
+                await _userConnection.LogoutAsync();
+                await _adminConnection.ExecuteAsync(Query.Aml((IFormattable)$"<Item type='User' action='delete' id='{id}' />"));
+            }
+        }
+
+        public override async Task<BufferedCommandResult> RunProcess(params string[] args)
+        {
+            if (_userConnection == null)
+                await Connect();
+            var cliExecutable = "AnsysMinerva_CLI.exe";
+            var result = await Cli.Wrap(Path.Combine(Environment.CurrentDirectory, OperatingSystem.IsLinux() ? Path.GetFileNameWithoutExtension(cliExecutable) : cliExecutable))
+                .WithArguments(args)
+                .WithEnvironmentVariables(new Dictionary<string, string?>()
+                {
+                    { "ANS_MINERVA_AUTH__MODE", "explicit" },
+                    { "ANS_MINERVA_AUTH__DATABASE", _adminConnection.Session.Database },
+                    { "ANS_MINERVA_AUTH__USER", _username },
+                    { "ANS_MINERVA_AUTH__PASSWORD", _password },
+                    { "ANS_MINERVA_INTERACTIVE", "console" },
+                    { "ANS_MINERVA_LOGFILE", "stream://stderr" }
+                })
+                .ExecuteBufferedAsync();
+            Output.WriteLine($"Command `{string.Join(" ", args)}` returned {result.ExitCode} in {result.RunTime}");
+            if (!string.IsNullOrEmpty(result.StandardError))
+                Output.WriteLine(result.StandardError);
+            return result;
+        }
+
+        private async Task<Item> CreateNewUser()
+        {
+            var unique = Base32.ToBase32String(Guid.NewGuid().ToByteArray());
+            _username = "u" + unique;
+            _password = Guid.NewGuid().ToArasId().ToLowerInvariant();
+            var passwordHash = default(string);
+            using (var md5 = MD5.Create())
+            {
+                passwordHash = md5.ComputeHash(Encoding.UTF8.GetBytes(_password)).ToHexString();
+            }
+
+            var newUser = (await _adminConnection.ExecuteAsync(Query.Aml((IFormattable)$@"
+                    <Item type='User' action='add'>
+                        <login_name>{_username}</login_name>
+                        <password>{passwordHash}</password>
+                        <first_name>Api</first_name>
+                        <last_name>{unique}</last_name>
+                        <logon_enabled>1</logon_enabled>
+                    </Item>"))).AssertItem();
+
+            return newUser;
+        }
+    }
+}

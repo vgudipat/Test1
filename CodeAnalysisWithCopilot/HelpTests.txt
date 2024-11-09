@@ -1,0 +1,1868 @@
+﻿using Ansys.Minerva.Cmd.Help;
+using Ansys.Minerva.IntegrationFramework.Common;
+using Ansys.Minerva.IntegrationFramework.Common.Commands;
+using CommandLine;
+using CommandLine.Text;
+using Microsoft.Extensions.Configuration;
+using System;
+using System.Collections.Generic;
+using Xunit;
+
+namespace Ansys.Minerva.CmdTest.HelpTests
+{
+	public class HelpTests
+	{
+		public HelpTests()
+		{
+			HelpCommand.AssemblyName = "AnsysMinerva_CLI.exe";
+		}
+
+		private static readonly Type[] _verbs = new[]
+		{
+			typeof(DownloadOptions),
+			typeof(ClaimOptions),
+			typeof(UnclaimOptions),
+			typeof(GetStatusOptions),
+			typeof(SignOutOptions),
+			typeof(StageOptions),
+			typeof(UnstageOptions),
+			typeof(UploadOptions),
+			typeof(SelectItemsOptions),
+			typeof(LocalApplicationOptions),
+			typeof(FetchStatusOptions)
+		};
+
+		private static readonly string[] sampleGlob = [ "*.txt" ];
+		private static readonly string[] sampleMultipleGlobs = [ "*.txt", "*.rst" ];
+		private static readonly string[] fileWithWordGlob = [ "*word*" ];
+		private static readonly string[] cssFileGlob = [ "styles/*.css" ];
+		private static readonly string[] sampleRemote = ["ans_Data/7BEC3A1D84744EC994E01DD82697910B"];
+
+
+		[Fact(DisplayName = "Parsing `download --url http://www.example.com` should not return help.")]
+		public void ParsingAValidCommandLineShouldNotTriggerHelp()
+		{
+			var url = "http://www.example.com";
+			var options = Assert.IsType<DownloadOptions>(GetOptions("download", "--url", url));
+			Assert.Equal(url, options.Url);
+		}
+
+		[Fact(DisplayName = "Both `help` and `help --all` should parse correctly.")]
+		public void HelpVerbParserShouldCorrectlyIdentifyVerbAndOptions()
+		{
+			var options = GetHelpOptions("help");
+			Assert.False(options.All);
+			Assert.Null(options.Output);
+			Assert.Null(options.Verb);
+
+			options = GetHelpOptions("help", "--all");
+			Assert.True(options.All);
+			Assert.Null(options.Output);
+			Assert.Null(options.Verb);
+		}
+
+		[IgnoreForLinuxFact(DisplayName = "`help help` should return information about valid help options.")]
+		public void HelpVerbShouldReturnHelpForItself()
+		{
+			var options = GetHelpOptions("help", "help");
+			var output = new HelpCommand.HelpOutput(options, "1.2.3");
+			Assert.False(output.IsError);
+			var actual = output.ToString();
+			Assert.Equal(@"AnsysMinerva_CLI 1.2.3
+(c) 2024 ANSYS, Inc.  All rights reserved.
+
+Get additional help about each supported command.
+
+Usage:
+  AnsysMinerva_CLI.exe help [--all <All>] [--output <Output>] [<Verb>]
+
+Options:
+  --all      (Optional) Provide detailed information about all of the commands.
+  --output   (Optional) Outputs JSON data containing information about the items involved during command process. The
+             JSON can be written to one of the following locations:
+             - A relative path such as `some/folder/file.json`
+             - An absolute path such as `C:/temp/log.json`
+             - A data stream such as `stream://stdout` or `stream://stderr`
+  <Verb>     (Optional) The verb or command to provided detailed information for.
+  --help     Display this help screen.
+  --version  Display version information.
+", actual);
+		}
+
+		[IgnoreForLinuxFact(DisplayName = "`help` should return summary help for all visible commands and visible options.")]
+		public void HelpVerbWithNoOptionsShouldSummarizeAllCommands()
+		{
+			var options = GetHelpOptions("help");
+			var output = new HelpCommand.HelpOutput(options, "1.2.3");
+			Assert.False(output.IsError);
+			var actual = output.ToString();
+			Assert.Equal(@"AnsysMinerva_CLI 1.2.3
+(c) 2024 ANSYS, Inc.  All rights reserved.
+
+claim
+
+Claim one or more items within Minerva for exclusive editing.
+
+  Usage:
+    AnsysMinerva_CLI.exe claim [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+      [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-g|--glob <Glob> ...]
+      [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--output <Output>] [-r|--remote <Remote> ...]
+      [-u|--url <Url>]
+
+  Examples:
+
+    Claim a file:
+      AnsysMinerva_CLI.exe claim --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url http://ServerName/AnsysMinerva
+     or:
+      AnsysMinerva_CLI.exe claim --remote /Tasks/#1000003/Output/Report.xml --url http://ServerName/AnsysMinerva
+
+  For more help use:
+    AnsysMinerva_CLI.exe help claim
+
+download
+
+Download Minerva items to the local working directory.
+
+  Usage:
+    AnsysMinerva_CLI.exe download [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+      [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-c|--content <Content>]
+      [-d|--dependencies <Dependencies>] [--interactive <None|Console|Graphical>] [-l|--local <Local>]
+      [-n|--no-session ""False""] [-o|--overwrite <Error|Overwrite|Append|Ignore|Snapshot>] [--output <Output>]
+      [-p|--path <Path>] [--remote-start <Remote-Start>] [-r|--remote <Remote> ...] [-u|--url <Url>]
+
+  Examples:
+
+    Download a file with no session:
+      AnsysMinerva_CLI.exe download --no-session --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url
+        http://ServerName/AnsysMinerva
+     or:
+      AnsysMinerva_CLI.exe download --no-session --remote /Tasks/#1000003/Output/Report.xml --url
+        http://ServerName/AnsysMinerva
+
+  For more help use:
+    AnsysMinerva_CLI.exe help download
+
+fetch-status
+
+Query Ansys Minerva and return the latest information for each file in the local working directory.
+
+  Usage:
+    AnsysMinerva_CLI.exe fetch-status --output <Output> [--auth:certconfig <Auth:Certconfig>]
+      [--auth:database <Auth:Database>] [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>]
+      [--auth:user <Auth:User>] [-g|--glob <Glob> ...] [--interactive <None|Console|Graphical>] [-l|--local <Local>]
+      [-u|--url <Url>]
+
+  For more help use:
+    AnsysMinerva_CLI.exe help fetch-status
+
+get-status
+
+If you have used the `stage` command to prepare a list of files for upload, you can use the `get-status` command to see
+which files have been staged.
+
+  Usage:
+    AnsysMinerva_CLI.exe get-status [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--output <Output>]
+
+  Examples:
+
+    Get status of stage files:
+      AnsysMinerva_CLI.exe get-status
+
+  For more help use:
+    AnsysMinerva_CLI.exe help get-status
+
+select-items
+
+Use the select-items command to get information about items in Ansys Minerva which can be used with other commands. If
+you do not explicitly specify the items to select, a file or folder dialog box is displayed in which you can select
+files or folders from the Ansys Minerva data view. The output of this command is a JSON file that describes the items
+selected.
+
+  Usage:
+    AnsysMinerva_CLI.exe select-items --mode <SaveFile|SelectFile|SelectFolder|SelectFileFolder> --output <Output>
+      [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+      [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-d|--dependencies ""False""]
+      [--filter <Filter>] [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--multiSelect ""False""]
+      [--remote-start <Remote-Start>] [-r|--remote <Remote>] [-u|--url <Url>]
+
+  For more help use:
+    AnsysMinerva_CLI.exe help select-items
+
+sign-out
+
+Sign out from Ansys Minerva.
+
+  Usage:
+    AnsysMinerva_CLI.exe sign-out [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--output <Output>]
+      [-u|--url <Url>]
+
+  Examples:
+
+    Sign out of Minerva session:
+      AnsysMinerva_CLI.exe sign-out --url http://ServerName/AnsysMinerva
+
+  For more help use:
+    AnsysMinerva_CLI.exe help sign-out
+
+stage
+
+Use the `stage` command to prepare a list of files for upload to Ansys Minerva. This enables you to determine in advance
+which files you would like to upload, and then upload them at a time of your choosing.
+
+To stage files, you specify a pattern. Any files that match this pattern are flagged to be uploaded later. Although the
+physical directory may contain any number of files, only the staged files will be uploaded. If staging is not used, all
+modified files in the directory will be uploaded when the upload command is used (unless filtering options are added to
+the command).
+
+  Usage:
+    AnsysMinerva_CLI.exe stage [-g|--glob <Glob> ...] [--interactive <None|Console|Graphical>] [-l|--local <Local>]
+      [--output <Output>]
+
+  Examples:
+
+    Stage all files in top-level directory:
+      AnsysMinerva_CLI.exe stage --glob *
+
+    Stage all files in any subdirectory:
+      AnsysMinerva_CLI.exe stage --glob **/*
+
+  For more help use:
+    AnsysMinerva_CLI.exe help stage
+
+unclaim
+
+Unclaim one or more items within Minerva.
+
+  Usage:
+    AnsysMinerva_CLI.exe unclaim [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+      [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-g|--glob <Glob> ...]
+      [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--output <Output>] [-r|--remote <Remote> ...]
+      [-u|--url <Url>]
+
+  Examples:
+
+    Unclaim a file:
+      AnsysMinerva_CLI.exe unclaim --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url
+        http://ServerName/AnsysMinerva
+     or:
+      AnsysMinerva_CLI.exe unclaim --remote /Tasks/#1000003/Output/Report.xml --url http://ServerName/AnsysMinerva
+
+  For more help use:
+    AnsysMinerva_CLI.exe help unclaim
+
+unstage
+
+If the stage command has been used to stage a list of files for upload, you can use the unstage command to remove files
+from the staging list. Files that are removed from the staging list will not be uploaded.
+
+  Usage:
+    AnsysMinerva_CLI.exe unstage [-g|--glob <Glob> ...] [--interactive <None|Console|Graphical>] [-l|--local <Local>]
+      [--output <Output>]
+
+  Examples:
+
+    Unstage all files in top-level directory:
+      AnsysMinerva_CLI.exe unstage --glob *
+
+    Unstage all files in any subdirectory:
+      AnsysMinerva_CLI.exe unstage --glob **/*
+
+  For more help use:
+    AnsysMinerva_CLI.exe help unstage
+
+upload
+
+Use the `upload` command to upload files from a local directory to Ansys Minerva. If files have been staged with the
+`stage` command, staged files will be uploaded. Otherwise, all files will be uploaded. If the `--glob` option is used to
+search for a specific file pattern, all files matching the specified pattern will be uploaded.
+
+  Usage:
+    AnsysMinerva_CLI.exe upload [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+      [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-c|--close-session ""False""]
+      [-g|--glob <Glob> ...] [--interactive <None|Console|Graphical>] [-l|--local <Local>] [-n|--no-session ""False""]
+      [-o|--overwrite <Error|Overwrite|Append|Ignore|Snapshot>] [--output <Output>] [--remote-start <Remote-Start>]
+      [-r|--remote <Remote>] [-u|--url <Url>]
+
+  Examples:
+
+    Upload all files in the current working directory:
+      AnsysMinerva_CLI.exe upload --no-session --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url
+        http://ServerName/AnsysMinerva
+
+    Upload all *.txt files in any directory in current working directory:
+      AnsysMinerva_CLI.exe upload --glob **/*.txt --no-session --remote ans_Data/3B53CA6B992042D481A4EC3359A3EA59 --url
+        http://ServerName/AnsysMinerva
+
+  For more help use:
+    AnsysMinerva_CLI.exe help upload
+
+For complete help use:
+  AnsysMinerva_CLI.exe help --all
+", actual);
+		}
+
+		[IgnoreForLinuxFact(DisplayName = "`help --all` should return full help for all visible commands and visible options.")]
+		public void HelpVerbWithAllOptionShouldPrintFullHelpForAllCommands()
+		{
+			var options = GetHelpOptions("help", "--all");
+			var output = new HelpCommand.HelpOutput(options, "1.2.3");
+			Assert.False(output.IsError);
+			var actual = output.ToString();
+			Assert.Equal(@"AnsysMinerva_CLI 1.2.3
+(c) 2024 ANSYS, Inc.  All rights reserved.
+
+claim
+
+Claim one or more items within Minerva for exclusive editing.
+
+Usage:
+  AnsysMinerva_CLI.exe claim [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+    [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-g|--glob <Glob> ...]
+    [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--output <Output>] [-r|--remote <Remote> ...]
+    [-u|--url <Url>]
+
+Examples:
+
+  Claim a file:
+    AnsysMinerva_CLI.exe claim --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url http://ServerName/AnsysMinerva
+   or:
+    AnsysMinerva_CLI.exe claim --remote /Tasks/#1000003/Output/Report.xml --url http://ServerName/AnsysMinerva
+
+  Claim a directory:
+    AnsysMinerva_CLI.exe claim --remote /Data/Test2/Utility --url http://ServerName/AnsysMinerva
+
+  Claim multiple remotes relative path:
+    AnsysMinerva_CLI.exe claim --remote /Data/Test2/Utility Data/Test1/MyFile.txt --url http://ServerName/AnsysMinerva
+
+  Claim a remote file and all .txt files in current directory:
+    AnsysMinerva_CLI.exe claim --glob *.txt --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url
+      http://ServerName/AnsysMinerva
+
+Options:
+  --auth:certconfig  (Optional) The path to an `OAuth.config` file describing a trusted certificate which can be used
+                     for impersonation. The `ANS_MINERVA_AUTH__CERTCONFIG` environment variable or { ""Auth"": {
+                     ""CertConfig"": """" } } option in the `appsettings.json` file can also be used to set this value.
+  --auth:database    (Optional) The name of the database to connect to. The `ANS_MINERVA_AUTH__DATABASE` environment
+                     variable or { ""Auth"": { ""Database"": """" } } option in the `appsettings.json` file can also be used
+                     to set this value.
+  --auth:mode        (Optional) The type of authentication to use. If not specified, the user will be prompted to sign
+                     in using a graphical interface. The `ANS_MINERVA_AUTH__MODE` environment variable or { ""Auth"": {
+                     ""Mode"": """" } } option in the `appsettings.json` file can also be used to set this value.
+                     - Explicit: The user name and password will be provided for Ansys Minerva authentication.
+                     - Impersonate: The path to a trusted certificate will be provided which allows for impersonating
+                     any Ansys Minerva account.
+                     - Refresh_Token: An OAuth server refresh token will be provided.
+                     - Windows: The user name and password will be provided for use with Windows (NTLM/Kerberos)
+                     authentication.
+  --auth:user        (Optional) The name of the user to connect as. The `ANS_MINERVA_AUTH__USER` environment variable or
+                     { ""Auth"": { ""User"": """" } } option in the `appsettings.json` file can also be used to set this
+                     value.
+  -g, --glob         (Optional) One or more (space-delimited) glob patterns describing which files or folders to claim.
+  --interactive      (Optional) Specify the user interface to use. The `ANS_MINERVA_INTERACTIVE` environment variable or
+                     { ""Interactive"": """" } option in the `appsettings.json` file can also be used to set this value.
+                     - Console: The application is run from an interactive console window. Status messages and prompts
+                     will appear on the console.
+                     - Graphical: The application is run from a desktop with graphics. Status messages and prompts will
+                     appear in a graphical window.
+                     - None: The application is run in batch mode. If required options are not fully specified, and
+                     error will be raised.
+  -l, --local        (Optional) Specifies the local folder to which files will be downloaded (for example,
+                     `C:\MinervaSession`). The `ANS_MINERVA_LOCAL` environment variable or { ""Local"": """" } option in the
+                     `appsettings.json` file can also be used to set this value. If not specified at all, the current
+                     working directory of the process will be used by default.
+  --output           (Optional) Outputs JSON data containing information about the items involved during command
+                     process. The JSON can be written to one of the following locations:
+                     - A relative path such as `some/folder/file.json`
+                     - An absolute path such as `C:/temp/log.json`
+                     - A data stream such as `stream://stdout` or `stream://stderr`
+  -r, --remote       (Optional) Specifies a remote item to be claimed. If not specified, a browser dialog box will be
+                     displayed in which files and/or folders can be selected. Acceptable formats include:
+                     - An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+                     - A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)
+                     If claiming multiple items, separate them with a space (for example, `-r
+                     ans_Data/5F938BED154E4128B552C9F83264CDAE /Data/Directory1/Dir2`)
+  -u, --url          (Optional) The Ansys Minerva URL (for example, `https://server/AnsysMinerva`). If not specified as
+                     a command line option, the `ANS_MINERVA_URL` environment variable or { ""Url"": """" } option in the
+                     `appsettings.json` file should be set.
+
+Environment:
+  ANS_MINERVA_AUTH__PASSWORD  (Optional) The user's password.
+  ANS_MINERVA_AUTH__TOKEN     (Optional) The OIDC refresh token to use for authentication.
+
+download
+
+Download Minerva items to the local working directory.
+
+Usage:
+  AnsysMinerva_CLI.exe download [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+    [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-c|--content <Content>]
+    [-d|--dependencies <Dependencies>] [--interactive <None|Console|Graphical>] [-l|--local <Local>]
+    [-n|--no-session ""False""] [-o|--overwrite <Error|Overwrite|Append|Ignore|Snapshot>] [--output <Output>]
+    [-p|--path <Path>] [--remote-start <Remote-Start>] [-r|--remote <Remote> ...] [-u|--url <Url>]
+
+Examples:
+
+  Download a file with no session:
+    AnsysMinerva_CLI.exe download --no-session --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url
+      http://ServerName/AnsysMinerva
+   or:
+    AnsysMinerva_CLI.exe download --no-session --remote /Tasks/#1000003/Output/Report.xml --url
+      http://ServerName/AnsysMinerva
+
+  Download a directory structure with no session:
+    AnsysMinerva_CLI.exe download --no-session --remote /Data/Test2/Utility --url http://ServerName/AnsysMinerva
+   or:
+    AnsysMinerva_CLI.exe download --no-session --remote /Tasks/#1000003/Output --url http://ServerName/AnsysMinerva
+
+  Download a directory structure to a relative path:
+    AnsysMinerva_CLI.exe download --no-session --path DirectoryStructure --remote /Data/Test2/Utility --url
+      http://ServerName/AnsysMinerva
+
+  Download multiple remotes relative path:
+    AnsysMinerva_CLI.exe download --no-session --path MultipleRemotes --remote /Data/Test2/Utility Data/Test1/MyFile.txt
+      --url http://ServerName/AnsysMinerva
+
+  Download a directory contents to a relative path:
+    AnsysMinerva_CLI.exe download --content --no-session --path DirectoryContent --remote Data/Test2/Utility --url
+      http://ServerName/AnsysMinerva
+
+Options:
+  --auth:certconfig   (Optional) The path to an `OAuth.config` file describing a trusted certificate which can be used
+                      for impersonation. The `ANS_MINERVA_AUTH__CERTCONFIG` environment variable or { ""Auth"": {
+                      ""CertConfig"": """" } } option in the `appsettings.json` file can also be used to set this value.
+  --auth:database     (Optional) The name of the database to connect to. The `ANS_MINERVA_AUTH__DATABASE` environment
+                      variable or { ""Auth"": { ""Database"": """" } } option in the `appsettings.json` file can also be used
+                      to set this value.
+  --auth:mode         (Optional) The type of authentication to use. If not specified, the user will be prompted to sign
+                      in using a graphical interface. The `ANS_MINERVA_AUTH__MODE` environment variable or { ""Auth"": {
+                      ""Mode"": """" } } option in the `appsettings.json` file can also be used to set this value.
+                      - Explicit: The user name and password will be provided for Ansys Minerva authentication.
+                      - Impersonate: The path to a trusted certificate will be provided which allows for impersonating
+                      any Ansys Minerva account.
+                      - Refresh_Token: An OAuth server refresh token will be provided.
+                      - Windows: The user name and password will be provided for use with Windows (NTLM/Kerberos)
+                      authentication.
+  --auth:user         (Optional) The name of the user to connect as. The `ANS_MINERVA_AUTH__USER` environment variable
+                      or { ""Auth"": { ""User"": """" } } option in the `appsettings.json` file can also be used to set this
+                      value.
+  -c, --content       (Optional) When a folder is downloaded, a directory is created on disk with the name of the
+                      folder. The contents are downloaded inside of that directory. If this flag is set, the root
+                      directory is not created, and the contents are downloaded directly. For example, consider a folder
+                      `MyFolder` with one file `File.ext`. By default, the structure `MyFolder/File.ext` is created on
+                      disk. When `--content` is specified, only the structure `File.ext` is created.
+  -d, --dependencies  (Optional) Download each file's dependencies (`Depends On` relationships) in addition to the file.
+                      By default, only the requested files are downloaded.
+  --interactive       (Optional) Specify the user interface to use. The `ANS_MINERVA_INTERACTIVE` environment variable
+                      or { ""Interactive"": """" } option in the `appsettings.json` file can also be used to set this value.
+                      - Console: The application is run from an interactive console window. Status messages and prompts
+                      will appear on the console.
+                      - Graphical: The application is run from a desktop with graphics. Status messages and prompts will
+                      appear in a graphical window.
+                      - None: The application is run in batch mode. If required options are not fully specified, and
+                      error will be raised.
+  -l, --local         (Optional) Specifies the local folder to which files will be downloaded (for example,
+                      `C:\MinervaSession`). The `ANS_MINERVA_LOCAL` environment variable or { ""Local"": """" } option in
+                      the `appsettings.json` file can also be used to set this value. If not specified at all, the
+                      current working directory of the process will be used by default.
+  -n, --no-session    (Optional) (Default: False) Skip creating a session for tracking the digital thread. Only use this
+                      option if modified versions of the downloaded files will not be uploaded back into Ansys Minerva.
+  -o, --overwrite     (Optional) (Default: Error) When a local file of the same name already exists in the target
+                      folder, this specifies whether the downloaded file should overwrite the local file. If not
+                      specified, an error is thrown by default.
+                      - Append: Keep the existing files and add new files with appended names.
+                      - Error: Throw an error if any file will be overwritten.
+                      - Ignore: Do not transfer the conflicting files.
+                      - Overwrite: Silently overwrite any existing files with the new files.
+                      - Snapshot: Create a minor version for un-released files of the same name. Create a major version
+                      for released files.
+  --output            (Optional) Outputs JSON data containing information about the items involved during command
+                      process. The JSON can be written to one of the following locations:
+                      - A relative path such as `some/folder/file.json`
+                      - An absolute path such as `C:/temp/log.json`
+                      - A data stream such as `stream://stdout` or `stream://stderr`
+  -p, --path          (Optional) Relative path of a folder within the working directory to which files will be
+                      downloaded (for example, `Subdir1/Subdir2`).
+  --remote-start      (Optional) If you are not using the `--remote` option, this specifies the file or folder to be
+                      shown when the browser dialog box is first displayed. By default, the `Data` folder is shown. The
+                      path of the remote item can be specified in one of the following ways:
+                      - An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+                      - A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)
+  -r, --remote        (Optional) Specifies a remote item to be downloaded. If not specified, a browser dialog box will
+                      be displayed in which files and/or folders can be selected. Acceptable formats include:
+                      - An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+                      - A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)
+                      If downloading multiple items, separate them with a space (for example, `-r
+                      ans_Data/5F938BED154E4128B552C9F83264CDAE /Data/Directory1/Dir2`)
+  -u, --url           (Optional) The Ansys Minerva URL (for example, `https://server/AnsysMinerva`). If not specified as
+                      a command line option, the `ANS_MINERVA_URL` environment variable or { ""Url"": """" } option in the
+                      `appsettings.json` file should be set.
+
+Environment:
+  ANS_MINERVA_AUTH__PASSWORD  (Optional) The user's password.
+  ANS_MINERVA_AUTH__TOKEN     (Optional) The OIDC refresh token to use for authentication.
+
+fetch-status
+
+Query Ansys Minerva and return the latest information for each file in the local working directory.
+
+Usage:
+  AnsysMinerva_CLI.exe fetch-status --output <Output> [--auth:certconfig <Auth:Certconfig>]
+    [--auth:database <Auth:Database>] [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>]
+    [--auth:user <Auth:User>] [-g|--glob <Glob> ...] [--interactive <None|Console|Graphical>] [-l|--local <Local>]
+    [-u|--url <Url>]
+
+Options:
+  --output           (Required) Outputs JSON data containing information about the items which were selected. The JSON
+                     can be written to one of the following locations:
+                     - A relative path such as `some/folder/file.json`
+                     - An absolute path such as `C:/temp/log.json`
+                     - A data stream such as `stream://stdout` or `stream://stderr`
+  --auth:certconfig  (Optional) The path to an `OAuth.config` file describing a trusted certificate which can be used
+                     for impersonation. The `ANS_MINERVA_AUTH__CERTCONFIG` environment variable or { ""Auth"": {
+                     ""CertConfig"": """" } } option in the `appsettings.json` file can also be used to set this value.
+  --auth:database    (Optional) The name of the database to connect to. The `ANS_MINERVA_AUTH__DATABASE` environment
+                     variable or { ""Auth"": { ""Database"": """" } } option in the `appsettings.json` file can also be used
+                     to set this value.
+  --auth:mode        (Optional) The type of authentication to use. If not specified, the user will be prompted to sign
+                     in using a graphical interface. The `ANS_MINERVA_AUTH__MODE` environment variable or { ""Auth"": {
+                     ""Mode"": """" } } option in the `appsettings.json` file can also be used to set this value.
+                     - Explicit: The user name and password will be provided for Ansys Minerva authentication.
+                     - Impersonate: The path to a trusted certificate will be provided which allows for impersonating
+                     any Ansys Minerva account.
+                     - Refresh_Token: An OAuth server refresh token will be provided.
+                     - Windows: The user name and password will be provided for use with Windows (NTLM/Kerberos)
+                     authentication.
+  --auth:user        (Optional) The name of the user to connect as. The `ANS_MINERVA_AUTH__USER` environment variable or
+                     { ""Auth"": { ""User"": """" } } option in the `appsettings.json` file can also be used to set this
+                     value.
+  -g, --glob         (Optional) One or more (space-delimited) glob patterns describing which files or folders to stage
+                     for upload. If not specified, all staged files will be uploaded.
+  --interactive      (Optional) Specify the user interface to use. The `ANS_MINERVA_INTERACTIVE` environment variable or
+                     { ""Interactive"": """" } option in the `appsettings.json` file can also be used to set this value.
+                     - Console: The application is run from an interactive console window. Status messages and prompts
+                     will appear on the console.
+                     - Graphical: The application is run from a desktop with graphics. Status messages and prompts will
+                     appear in a graphical window.
+                     - None: The application is run in batch mode. If required options are not fully specified, and
+                     error will be raised.
+  -l, --local        (Optional) Specifies the local folder to which files will be downloaded (for example,
+                     `C:\MinervaSession`). The `ANS_MINERVA_LOCAL` environment variable or { ""Local"": """" } option in the
+                     `appsettings.json` file can also be used to set this value. If not specified at all, the current
+                     working directory of the process will be used by default.
+  -u, --url          (Optional) The Ansys Minerva URL (for example, `https://server/AnsysMinerva`). If not specified as
+                     a command line option, the `ANS_MINERVA_URL` environment variable or { ""Url"": """" } option in the
+                     `appsettings.json` file should be set.
+
+Environment:
+  ANS_MINERVA_AUTH__PASSWORD  (Optional) The user's password.
+  ANS_MINERVA_AUTH__TOKEN     (Optional) The OIDC refresh token to use for authentication.
+
+get-status
+
+If you have used the `stage` command to prepare a list of files for upload, you can use the `get-status` command to see
+which files have been staged.
+
+Usage:
+  AnsysMinerva_CLI.exe get-status [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--output <Output>]
+
+Examples:
+
+  Get status of stage files:
+    AnsysMinerva_CLI.exe get-status
+
+Options:
+  --interactive  (Optional) Specify the user interface to use. The `ANS_MINERVA_INTERACTIVE` environment variable or {
+                 ""Interactive"": """" } option in the `appsettings.json` file can also be used to set this value.
+                 - Console: The application is run from an interactive console window. Status messages and prompts will
+                 appear on the console.
+                 - Graphical: The application is run from a desktop with graphics. Status messages and prompts will
+                 appear in a graphical window.
+                 - None: The application is run in batch mode. If required options are not fully specified, and error
+                 will be raised.
+  -l, --local    (Optional) Specifies the local folder to which files will be downloaded (for example,
+                 `C:\MinervaSession`). The `ANS_MINERVA_LOCAL` environment variable or { ""Local"": """" } option in the
+                 `appsettings.json` file can also be used to set this value. If not specified at all, the current
+                 working directory of the process will be used by default.
+  --output       (Optional) Outputs JSON data containing information about the items involved during command process.
+                 The JSON can be written to one of the following locations:
+                 - A relative path such as `some/folder/file.json`
+                 - An absolute path such as `C:/temp/log.json`
+                 - A data stream such as `stream://stdout` or `stream://stderr`
+
+select-items
+
+Use the select-items command to get information about items in Ansys Minerva which can be used with other commands. If
+you do not explicitly specify the items to select, a file or folder dialog box is displayed in which you can select
+files or folders from the Ansys Minerva data view. The output of this command is a JSON file that describes the items
+selected.
+
+Usage:
+  AnsysMinerva_CLI.exe select-items --mode <SaveFile|SelectFile|SelectFolder|SelectFileFolder> --output <Output>
+    [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+    [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-d|--dependencies ""False""]
+    [--filter <Filter>] [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--multiSelect ""False""]
+    [--remote-start <Remote-Start>] [-r|--remote <Remote>] [-u|--url <Url>]
+
+Options:
+  --mode              (Required) (Default: SaveFile) The type of selection that is allowed.
+                      - SaveFile: Allows you to specify an Ansys Minerva folder as a save location and specify a name
+                      for the file being saved.
+                      - SelectFile: Allows selecting one or more files
+                      - SelectFileFolder: Allows the selection of files and/or folders.
+                      - SelectFolder: Allows the selection of folders.
+  --output            (Required) Outputs JSON data containing information about the items which were selected. The JSON
+                      can be written to one of the following locations:
+                      - A relative path such as `some/folder/file.json`
+                      - An absolute path such as `C:/temp/log.json`
+                      - A data stream such as `stream://stdout` or `stream://stderr`
+  --auth:certconfig   (Optional) The path to an `OAuth.config` file describing a trusted certificate which can be used
+                      for impersonation. The `ANS_MINERVA_AUTH__CERTCONFIG` environment variable or { ""Auth"": {
+                      ""CertConfig"": """" } } option in the `appsettings.json` file can also be used to set this value.
+  --auth:database     (Optional) The name of the database to connect to. The `ANS_MINERVA_AUTH__DATABASE` environment
+                      variable or { ""Auth"": { ""Database"": """" } } option in the `appsettings.json` file can also be used
+                      to set this value.
+  --auth:mode         (Optional) The type of authentication to use. If not specified, the user will be prompted to sign
+                      in using a graphical interface. The `ANS_MINERVA_AUTH__MODE` environment variable or { ""Auth"": {
+                      ""Mode"": """" } } option in the `appsettings.json` file can also be used to set this value.
+                      - Explicit: The user name and password will be provided for Ansys Minerva authentication.
+                      - Impersonate: The path to a trusted certificate will be provided which allows for impersonating
+                      any Ansys Minerva account.
+                      - Refresh_Token: An OAuth server refresh token will be provided.
+                      - Windows: The user name and password will be provided for use with Windows (NTLM/Kerberos)
+                      authentication.
+  --auth:user         (Optional) The name of the user to connect as. The `ANS_MINERVA_AUTH__USER` environment variable
+                      or { ""Auth"": { ""User"": """" } } option in the `appsettings.json` file can also be used to set this
+                      value.
+  -d, --dependencies  (Optional) (Default: False) Get information about each file's dependencies (`Depends On`
+                      relationships) in addition to the file. By default, only the requested files are included.
+  --filter            (Optional) Describes the file extension choices to be shown in the 'Save as file type' or 'Files
+                      of type' drop-down in the dialog box. (For example, `Image
+                      Files(*.BMP;*.JPG;*.GIF)|*.BMP;*.JPG;*.GIF|All files (*.*)|*.*`)
+  --interactive       (Optional) Specify the user interface to use. The `ANS_MINERVA_INTERACTIVE` environment variable
+                      or { ""Interactive"": """" } option in the `appsettings.json` file can also be used to set this value.
+                      - Console: The application is run from an interactive console window. Status messages and prompts
+                      will appear on the console.
+                      - Graphical: The application is run from a desktop with graphics. Status messages and prompts will
+                      appear in a graphical window.
+                      - None: The application is run in batch mode. If required options are not fully specified, and
+                      error will be raised.
+  -l, --local         (Optional) Specifies the local folder to which files will be downloaded (for example,
+                      `C:\MinervaSession`). The `ANS_MINERVA_LOCAL` environment variable or { ""Local"": """" } option in
+                      the `appsettings.json` file can also be used to set this value. If not specified at all, the
+                      current working directory of the process will be used by default.
+  --multiSelect       (Optional) (Default: False) Specifies that multiple items can be selected. By default, only one
+                      item can be selected.
+  --remote-start      (Optional) If you are not using the `--remote` option, this specifies the file or folder to be
+                      shown when the browser dialog box is first displayed. By default, the `Data` folder is shown. The
+                      path of the remote item can be specified in one of the following ways:
+                      - An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+                      - A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)
+  -r, --remote        (Optional) Specifies a remote item to be downloaded. If not specified, a browser dialog box will
+                      be displayed in which files and/or folders can be selected. Acceptable formats include:
+                      - An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+                      - A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)
+                      If downloading multiple items, separate them with a space (for example, `-r
+                      ans_Data/5F938BED154E4128B552C9F83264CDAE /Data/Directory1/Dir2`)
+  -u, --url           (Optional) The Ansys Minerva URL (for example, `https://server/AnsysMinerva`). If not specified as
+                      a command line option, the `ANS_MINERVA_URL` environment variable or { ""Url"": """" } option in the
+                      `appsettings.json` file should be set.
+
+Environment:
+  ANS_MINERVA_AUTH__PASSWORD  (Optional) The user's password.
+  ANS_MINERVA_AUTH__TOKEN     (Optional) The OIDC refresh token to use for authentication.
+
+sign-out
+
+Sign out from Ansys Minerva.
+
+Usage:
+  AnsysMinerva_CLI.exe sign-out [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--output <Output>]
+    [-u|--url <Url>]
+
+Examples:
+
+  Sign out of Minerva session:
+    AnsysMinerva_CLI.exe sign-out --url http://ServerName/AnsysMinerva
+
+Options:
+  --interactive  (Optional) Specify the user interface to use. The `ANS_MINERVA_INTERACTIVE` environment variable or {
+                 ""Interactive"": """" } option in the `appsettings.json` file can also be used to set this value.
+                 - Console: The application is run from an interactive console window. Status messages and prompts will
+                 appear on the console.
+                 - Graphical: The application is run from a desktop with graphics. Status messages and prompts will
+                 appear in a graphical window.
+                 - None: The application is run in batch mode. If required options are not fully specified, and error
+                 will be raised.
+  -l, --local    (Optional) Specifies the local folder to which files will be downloaded (for example,
+                 `C:\MinervaSession`). The `ANS_MINERVA_LOCAL` environment variable or { ""Local"": """" } option in the
+                 `appsettings.json` file can also be used to set this value. If not specified at all, the current
+                 working directory of the process will be used by default.
+  --output       (Optional) Outputs JSON data containing information about the items involved during command process.
+                 The JSON can be written to one of the following locations:
+                 - A relative path such as `some/folder/file.json`
+                 - An absolute path such as `C:/temp/log.json`
+                 - A data stream such as `stream://stdout` or `stream://stderr`
+  -u, --url      (Optional) The Ansys Minerva URL (for example, `https://server/AnsysMinerva`). If not specified as a
+                 command line option, the `ANS_MINERVA_URL` environment variable or { ""Url"": """" } option in the
+                 `appsettings.json` file should be set.
+
+stage
+
+Use the `stage` command to prepare a list of files for upload to Ansys Minerva. This enables you to determine in advance
+which files you would like to upload, and then upload them at a time of your choosing.
+
+To stage files, you specify a pattern. Any files that match this pattern are flagged to be uploaded later. Although the
+physical directory may contain any number of files, only the staged files will be uploaded. If staging is not used, all
+modified files in the directory will be uploaded when the upload command is used (unless filtering options are added to
+the command).
+
+Usage:
+  AnsysMinerva_CLI.exe stage [-g|--glob <Glob> ...] [--interactive <None|Console|Graphical>] [-l|--local <Local>]
+    [--output <Output>]
+
+Examples:
+
+  Stage all files in top-level directory:
+    AnsysMinerva_CLI.exe stage --glob *
+
+  Stage all files in any subdirectory:
+    AnsysMinerva_CLI.exe stage --glob **/*
+
+  Stage all files in any subdirectory under 'dir/':
+    AnsysMinerva_CLI.exe stage --glob dir/**/*
+
+  Stage all files with .txt file extension in root directory:
+    AnsysMinerva_CLI.exe stage --glob *.txt
+
+  Stage all files with .txt file extension from root directory recursively:
+    AnsysMinerva_CLI.exe stage --glob **/*.txt
+
+  Stage all files with 'word' in the filename:
+    AnsysMinerva_CLI.exe stage --glob *word*
+
+  Stage all files with extension '.css' in the directory 'styles/':
+    AnsysMinerva_CLI.exe stage --glob styles/*.css
+
+  Stage all .txt and .rst files in current directory using multiple globs:
+    AnsysMinerva_CLI.exe stage --glob *.txt *.rst
+
+Options:
+  -g, --glob     (Optional) One or more (space-delimited) glob patterns describing which files or folders to stage for
+                 upload.
+  --interactive  (Optional) Specify the user interface to use. The `ANS_MINERVA_INTERACTIVE` environment variable or {
+                 ""Interactive"": """" } option in the `appsettings.json` file can also be used to set this value.
+                 - Console: The application is run from an interactive console window. Status messages and prompts will
+                 appear on the console.
+                 - Graphical: The application is run from a desktop with graphics. Status messages and prompts will
+                 appear in a graphical window.
+                 - None: The application is run in batch mode. If required options are not fully specified, and error
+                 will be raised.
+  -l, --local    (Optional) Specifies the local folder to which files will be downloaded (for example,
+                 `C:\MinervaSession`). The `ANS_MINERVA_LOCAL` environment variable or { ""Local"": """" } option in the
+                 `appsettings.json` file can also be used to set this value. If not specified at all, the current
+                 working directory of the process will be used by default.
+  --output       (Optional) Outputs JSON data containing information about the items involved during command process.
+                 The JSON can be written to one of the following locations:
+                 - A relative path such as `some/folder/file.json`
+                 - An absolute path such as `C:/temp/log.json`
+                 - A data stream such as `stream://stdout` or `stream://stderr`
+
+unclaim
+
+Unclaim one or more items within Minerva.
+
+Usage:
+  AnsysMinerva_CLI.exe unclaim [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+    [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-g|--glob <Glob> ...]
+    [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--output <Output>] [-r|--remote <Remote> ...]
+    [-u|--url <Url>]
+
+Examples:
+
+  Unclaim a file:
+    AnsysMinerva_CLI.exe unclaim --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url http://ServerName/AnsysMinerva
+   or:
+    AnsysMinerva_CLI.exe unclaim --remote /Tasks/#1000003/Output/Report.xml --url http://ServerName/AnsysMinerva
+
+  Unclaim a directory:
+    AnsysMinerva_CLI.exe unclaim --remote /Data/Test2/Utility --url http://ServerName/AnsysMinerva
+
+  Unclaim multiple remotes relative path:
+    AnsysMinerva_CLI.exe unclaim --remote /Data/Test2/Utility Data/Test1/MyFile.txt --url http://ServerName/AnsysMinerva
+
+  Unclaim a remote file and all .txt files in current directory:
+    AnsysMinerva_CLI.exe unclaim --glob *.txt --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url
+      http://ServerName/AnsysMinerva
+
+Options:
+  --auth:certconfig  (Optional) The path to an `OAuth.config` file describing a trusted certificate which can be used
+                     for impersonation. The `ANS_MINERVA_AUTH__CERTCONFIG` environment variable or { ""Auth"": {
+                     ""CertConfig"": """" } } option in the `appsettings.json` file can also be used to set this value.
+  --auth:database    (Optional) The name of the database to connect to. The `ANS_MINERVA_AUTH__DATABASE` environment
+                     variable or { ""Auth"": { ""Database"": """" } } option in the `appsettings.json` file can also be used
+                     to set this value.
+  --auth:mode        (Optional) The type of authentication to use. If not specified, the user will be prompted to sign
+                     in using a graphical interface. The `ANS_MINERVA_AUTH__MODE` environment variable or { ""Auth"": {
+                     ""Mode"": """" } } option in the `appsettings.json` file can also be used to set this value.
+                     - Explicit: The user name and password will be provided for Ansys Minerva authentication.
+                     - Impersonate: The path to a trusted certificate will be provided which allows for impersonating
+                     any Ansys Minerva account.
+                     - Refresh_Token: An OAuth server refresh token will be provided.
+                     - Windows: The user name and password will be provided for use with Windows (NTLM/Kerberos)
+                     authentication.
+  --auth:user        (Optional) The name of the user to connect as. The `ANS_MINERVA_AUTH__USER` environment variable or
+                     { ""Auth"": { ""User"": """" } } option in the `appsettings.json` file can also be used to set this
+                     value.
+  -g, --glob         (Optional) One or more (space-delimited) glob patterns describing which files or folders to
+                     unclaim.
+  --interactive      (Optional) Specify the user interface to use. The `ANS_MINERVA_INTERACTIVE` environment variable or
+                     { ""Interactive"": """" } option in the `appsettings.json` file can also be used to set this value.
+                     - Console: The application is run from an interactive console window. Status messages and prompts
+                     will appear on the console.
+                     - Graphical: The application is run from a desktop with graphics. Status messages and prompts will
+                     appear in a graphical window.
+                     - None: The application is run in batch mode. If required options are not fully specified, and
+                     error will be raised.
+  -l, --local        (Optional) Specifies the local folder to which files will be downloaded (for example,
+                     `C:\MinervaSession`). The `ANS_MINERVA_LOCAL` environment variable or { ""Local"": """" } option in the
+                     `appsettings.json` file can also be used to set this value. If not specified at all, the current
+                     working directory of the process will be used by default.
+  --output           (Optional) Outputs JSON data containing information about the items involved during command
+                     process. The JSON can be written to one of the following locations:
+                     - A relative path such as `some/folder/file.json`
+                     - An absolute path such as `C:/temp/log.json`
+                     - A data stream such as `stream://stdout` or `stream://stderr`
+  -r, --remote       (Optional) Specifies a remote item to be unclaimed. Acceptable formats include:
+                     - An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+                     - A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)
+                     If unclaiming multiple items, separate them with a space (for example, `-r
+                     ans_Data/5F938BED154E4128B552C9F83264CDAE /Data/Directory1/Dir2`)
+  -u, --url          (Optional) The Ansys Minerva URL (for example, `https://server/AnsysMinerva`). If not specified as
+                     a command line option, the `ANS_MINERVA_URL` environment variable or { ""Url"": """" } option in the
+                     `appsettings.json` file should be set.
+
+Environment:
+  ANS_MINERVA_AUTH__PASSWORD  (Optional) The user's password.
+  ANS_MINERVA_AUTH__TOKEN     (Optional) The OIDC refresh token to use for authentication.
+
+unstage
+
+If the stage command has been used to stage a list of files for upload, you can use the unstage command to remove files
+from the staging list. Files that are removed from the staging list will not be uploaded.
+
+Usage:
+  AnsysMinerva_CLI.exe unstage [-g|--glob <Glob> ...] [--interactive <None|Console|Graphical>] [-l|--local <Local>]
+    [--output <Output>]
+
+Examples:
+
+  Unstage all files in top-level directory:
+    AnsysMinerva_CLI.exe unstage --glob *
+
+  Unstage all files in any subdirectory:
+    AnsysMinerva_CLI.exe unstage --glob **/*
+
+  Unstage all files in any subdirectory under 'dir/':
+    AnsysMinerva_CLI.exe unstage --glob dir/**/*
+
+  Unstage all files with .txt file extension in root directory:
+    AnsysMinerva_CLI.exe unstage --glob *.txt
+
+  Unstage all files with .txt file extension from root directory recursively:
+    AnsysMinerva_CLI.exe unstage --glob **/*.txt
+
+  Unstage all files with 'word' in the filename:
+    AnsysMinerva_CLI.exe unstage --glob *word*
+
+  Unstage all files with extension '.css' in the directory 'styles/':
+    AnsysMinerva_CLI.exe unstage --glob styles/*.css
+
+  Unstage all .txt and .rst files in current directory using multiple globs:
+    AnsysMinerva_CLI.exe unstage --glob *.txt *.rst
+
+Options:
+  -g, --glob     (Optional) One or more (space-delimited) glob patterns describing which files or folders should not be
+                 uploaded.
+  --interactive  (Optional) Specify the user interface to use. The `ANS_MINERVA_INTERACTIVE` environment variable or {
+                 ""Interactive"": """" } option in the `appsettings.json` file can also be used to set this value.
+                 - Console: The application is run from an interactive console window. Status messages and prompts will
+                 appear on the console.
+                 - Graphical: The application is run from a desktop with graphics. Status messages and prompts will
+                 appear in a graphical window.
+                 - None: The application is run in batch mode. If required options are not fully specified, and error
+                 will be raised.
+  -l, --local    (Optional) Specifies the local folder to which files will be downloaded (for example,
+                 `C:\MinervaSession`). The `ANS_MINERVA_LOCAL` environment variable or { ""Local"": """" } option in the
+                 `appsettings.json` file can also be used to set this value. If not specified at all, the current
+                 working directory of the process will be used by default.
+  --output       (Optional) Outputs JSON data containing information about the items involved during command process.
+                 The JSON can be written to one of the following locations:
+                 - A relative path such as `some/folder/file.json`
+                 - An absolute path such as `C:/temp/log.json`
+                 - A data stream such as `stream://stdout` or `stream://stderr`
+
+upload
+
+Use the `upload` command to upload files from a local directory to Ansys Minerva. If files have been staged with the
+`stage` command, staged files will be uploaded. Otherwise, all files will be uploaded. If the `--glob` option is used to
+search for a specific file pattern, all files matching the specified pattern will be uploaded.
+
+Usage:
+  AnsysMinerva_CLI.exe upload [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+    [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-c|--close-session ""False""]
+    [-g|--glob <Glob> ...] [--interactive <None|Console|Graphical>] [-l|--local <Local>] [-n|--no-session ""False""]
+    [-o|--overwrite <Error|Overwrite|Append|Ignore|Snapshot>] [--output <Output>] [--remote-start <Remote-Start>]
+    [-r|--remote <Remote>] [-u|--url <Url>]
+
+Examples:
+
+  Upload all files in the current working directory:
+    AnsysMinerva_CLI.exe upload --no-session --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url
+      http://ServerName/AnsysMinerva
+
+  Upload all *.txt files in any directory in current working directory:
+    AnsysMinerva_CLI.exe upload --glob **/*.txt --no-session --remote ans_Data/3B53CA6B992042D481A4EC3359A3EA59 --url
+      http://ServerName/AnsysMinerva
+
+  Upload all files in any subdirectory under 'dir/':
+    AnsysMinerva_CLI.exe upload --glob dir/**/* --no-session --remote ans_Data/3B53CA6B992042D481A4EC3359A3EA59 --url
+      http://ServerName/AnsysMinerva
+
+  Upload all files with 'word' in the filename:
+    AnsysMinerva_CLI.exe upload --glob *word* --no-session --remote ans_Data/3B53CA6B992042D481A4EC3359A3EA59 --url
+      http://ServerName/AnsysMinerva
+
+  Upload all .txt and .rst files in current directory using multiple globs:
+    AnsysMinerva_CLI.exe upload --glob *.txt *.rst --no-session --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url
+      http://ServerName/AnsysMinerva
+
+Options:
+  --auth:certconfig    (Optional) The path to an `OAuth.config` file describing a trusted certificate which can be used
+                       for impersonation. The `ANS_MINERVA_AUTH__CERTCONFIG` environment variable or { ""Auth"": {
+                       ""CertConfig"": """" } } option in the `appsettings.json` file can also be used to set this value.
+  --auth:database      (Optional) The name of the database to connect to. The `ANS_MINERVA_AUTH__DATABASE` environment
+                       variable or { ""Auth"": { ""Database"": """" } } option in the `appsettings.json` file can also be used
+                       to set this value.
+  --auth:mode          (Optional) The type of authentication to use. If not specified, the user will be prompted to sign
+                       in using a graphical interface. The `ANS_MINERVA_AUTH__MODE` environment variable or { ""Auth"": {
+                       ""Mode"": """" } } option in the `appsettings.json` file can also be used to set this value.
+                       - Explicit: The user name and password will be provided for Ansys Minerva authentication.
+                       - Impersonate: The path to a trusted certificate will be provided which allows for impersonating
+                       any Ansys Minerva account.
+                       - Refresh_Token: An OAuth server refresh token will be provided.
+                       - Windows: The user name and password will be provided for use with Windows (NTLM/Kerberos)
+                       authentication.
+  --auth:user          (Optional) The name of the user to connect as. The `ANS_MINERVA_AUTH__USER` environment variable
+                       or { ""Auth"": { ""User"": """" } } option in the `appsettings.json` file can also be used to set this
+                       value.
+  -c, --close-session  (Optional) (Default: False) Close the session after upload is complete.
+  -g, --glob           (Optional) One or more (space-delimited) glob patterns describing which files or folders to stage
+                       for upload. If not specified, all staged files will be uploaded.
+  --interactive        (Optional) Specify the user interface to use. The `ANS_MINERVA_INTERACTIVE` environment variable
+                       or { ""Interactive"": """" } option in the `appsettings.json` file can also be used to set this
+                       value.
+                       - Console: The application is run from an interactive console window. Status messages and prompts
+                       will appear on the console.
+                       - Graphical: The application is run from a desktop with graphics. Status messages and prompts
+                       will appear in a graphical window.
+                       - None: The application is run in batch mode. If required options are not fully specified, and
+                       error will be raised.
+  -l, --local          (Optional) Specifies the local folder to which files will be downloaded (for example,
+                       `C:\MinervaSession`). The `ANS_MINERVA_LOCAL` environment variable or { ""Local"": """" } option in
+                       the `appsettings.json` file can also be used to set this value. If not specified at all, the
+                       current working directory of the process will be used by default.
+  -n, --no-session     (Optional) (Default: False) Skip creating a full session for tracking the flow of data in the
+                       digital thread (or close the existing session immediately after files are transferred).
+  -o, --overwrite      (Optional) (Default: Error) When a remote file of the same name already exists in Ansys Minerva,
+                       this specifies whether the uploaded file should overwrite the existing file. If not specified, an
+                       error is thrown by default.
+                       - Append: Keep the existing files and add new files with appended names.
+                       - Error: Throw an error if any file will be overwritten.
+                       - Ignore: Do not transfer the conflicting files.
+                       - Overwrite: Silently overwrite any existing files with the new files.
+                       - Snapshot: Create a minor version for un-released files of the same name. Create a major version
+                       for released files.
+  --output             (Optional) Outputs JSON data containing information about the items involved during command
+                       process. The JSON can be written to one of the following locations:
+                       - A relative path such as `some/folder/file.json`
+                       - An absolute path such as `C:/temp/log.json`
+                       - A data stream such as `stream://stdout` or `stream://stderr`
+  --remote-start       (Optional) If you are not using the `--remote` option, this specifies the file or folder to be
+                       shown when the browser dialog box is first displayed. By default, the `Data` folder is shown. The
+                       path of the remote item can be specified in one of the following ways:
+                       - An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+                       - A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)
+  -r, --remote         (Optional) Specifies a remote location in Ansys Minerva to which files are to be uploaded. If not
+                       specified, a browser dialog box will be displayed in which a folder can be selected. Acceptable
+                       formats include:
+                       - An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+                       - A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)
+  -u, --url            (Optional) The Ansys Minerva URL (for example, `https://server/AnsysMinerva`). If not specified
+                       as a command line option, the `ANS_MINERVA_URL` environment variable or { ""Url"": """" } option in
+                       the `appsettings.json` file should be set.
+
+Environment:
+  ANS_MINERVA_AUTH__PASSWORD  (Optional) The user's password.
+  ANS_MINERVA_AUTH__TOKEN     (Optional) The OIDC refresh token to use for authentication.
+", actual);
+		}
+
+		[IgnoreForLinuxFact(DisplayName = "When a required option is omitted (`fetch-status`), an error should be returned and full help for the particular verb should be displayed.")]
+		public void NotSpecifyingARequiredOptionShouldReturnAnErrorAndProvideHelpForVerb()
+		{
+			var options = GetHelpOptions("fetch-status");
+			Assert.False(options.All);
+			Assert.Null(options.Output);
+			var version = "1.2.3";
+			var output = new HelpCommand.HelpOutput(options, version);
+			Assert.True(output.IsError);
+			Assert.Equal(version, output.Version);
+			Assert.Equal("fetch-status", Assert.Single(output.Commands).Name);
+			Assert.Equal("Required option 'output' is missing.", output.Error.Message);
+			Assert.Equal("CommandLine.MissingRequiredOptionError", output.Error.Type);
+
+			var actual = output.ToString();
+			Assert.Equal(@"AnsysMinerva_CLI 1.2.3
+(c) 2024 ANSYS, Inc.  All rights reserved.
+
+Errors:
+  Required option 'output' is missing.
+
+Query Ansys Minerva and return the latest information for each file in the local working directory.
+
+Usage:
+  AnsysMinerva_CLI.exe fetch-status --output <Output> [--auth:certconfig <Auth:Certconfig>]
+    [--auth:database <Auth:Database>] [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>]
+    [--auth:user <Auth:User>] [-g|--glob <Glob> ...] [--interactive <None|Console|Graphical>] [-l|--local <Local>]
+    [-u|--url <Url>]
+
+Options:
+  --output           (Required) Outputs JSON data containing information about the items which were selected. The JSON
+                     can be written to one of the following locations:
+                     - A relative path such as `some/folder/file.json`
+                     - An absolute path such as `C:/temp/log.json`
+                     - A data stream such as `stream://stdout` or `stream://stderr`
+  --auth:certconfig  (Optional) The path to an `OAuth.config` file describing a trusted certificate which can be used
+                     for impersonation. The `ANS_MINERVA_AUTH__CERTCONFIG` environment variable or { ""Auth"": {
+                     ""CertConfig"": """" } } option in the `appsettings.json` file can also be used to set this value.
+  --auth:database    (Optional) The name of the database to connect to. The `ANS_MINERVA_AUTH__DATABASE` environment
+                     variable or { ""Auth"": { ""Database"": """" } } option in the `appsettings.json` file can also be used
+                     to set this value.
+  --auth:mode        (Optional) The type of authentication to use. If not specified, the user will be prompted to sign
+                     in using a graphical interface. The `ANS_MINERVA_AUTH__MODE` environment variable or { ""Auth"": {
+                     ""Mode"": """" } } option in the `appsettings.json` file can also be used to set this value.
+                     - Explicit: The user name and password will be provided for Ansys Minerva authentication.
+                     - Impersonate: The path to a trusted certificate will be provided which allows for impersonating
+                     any Ansys Minerva account.
+                     - Refresh_Token: An OAuth server refresh token will be provided.
+                     - Windows: The user name and password will be provided for use with Windows (NTLM/Kerberos)
+                     authentication.
+  --auth:user        (Optional) The name of the user to connect as. The `ANS_MINERVA_AUTH__USER` environment variable or
+                     { ""Auth"": { ""User"": """" } } option in the `appsettings.json` file can also be used to set this
+                     value.
+  -g, --glob         (Optional) One or more (space-delimited) glob patterns describing which files or folders to stage
+                     for upload. If not specified, all staged files will be uploaded.
+  --interactive      (Optional) Specify the user interface to use. The `ANS_MINERVA_INTERACTIVE` environment variable or
+                     { ""Interactive"": """" } option in the `appsettings.json` file can also be used to set this value.
+                     - Console: The application is run from an interactive console window. Status messages and prompts
+                     will appear on the console.
+                     - Graphical: The application is run from a desktop with graphics. Status messages and prompts will
+                     appear in a graphical window.
+                     - None: The application is run in batch mode. If required options are not fully specified, and
+                     error will be raised.
+  -l, --local        (Optional) Specifies the local folder to which files will be downloaded (for example,
+                     `C:\MinervaSession`). The `ANS_MINERVA_LOCAL` environment variable or { ""Local"": """" } option in the
+                     `appsettings.json` file can also be used to set this value. If not specified at all, the current
+                     working directory of the process will be used by default.
+  -u, --url          (Optional) The Ansys Minerva URL (for example, `https://server/AnsysMinerva`). If not specified as
+                     a command line option, the `ANS_MINERVA_URL` environment variable or { ""Url"": """" } option in the
+                     `appsettings.json` file should be set.
+  --help             Display this help screen.
+  --version          Display version information.
+
+Environment:
+  ANS_MINERVA_AUTH__PASSWORD  (Optional) The user's password.
+  ANS_MINERVA_AUTH__TOKEN     (Optional) The OIDC refresh token to use for authentication.
+", actual);
+		}
+
+		[IgnoreForLinuxFact(DisplayName = "Specifying an invalid verb (`dwnload --url http://example.com`) should display an error message and summary help for all the commands.")]
+		public void SpecifyingAnInvalidVerbShouldReturnErrorAndSummarizeAllCommands()
+		{
+			var options = GetHelpOptions("dwnload", "--url", "http://example.com");
+			Assert.False(options.All);
+			Assert.Null(options.Output);
+			var version = "1.2.3";
+			var output = new HelpCommand.HelpOutput(options, version);
+			Assert.Equal(version, output.Version);
+			Assert.Equal("Verb 'dwnload' is not recognized.", output.Error.Message);
+			Assert.True(output.IsError);
+			var actual = output.ToString();
+			Assert.Equal(@"AnsysMinerva_CLI 1.2.3
+(c) 2024 ANSYS, Inc.  All rights reserved.
+
+Errors:
+  Verb 'dwnload' is not recognized.
+
+claim
+
+Claim one or more items within Minerva for exclusive editing.
+
+  Usage:
+    AnsysMinerva_CLI.exe claim [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+      [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-g|--glob <Glob> ...]
+      [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--output <Output>] [-r|--remote <Remote> ...]
+      [-u|--url <Url>]
+
+  Examples:
+
+    Claim a file:
+      AnsysMinerva_CLI.exe claim --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url http://ServerName/AnsysMinerva
+     or:
+      AnsysMinerva_CLI.exe claim --remote /Tasks/#1000003/Output/Report.xml --url http://ServerName/AnsysMinerva
+
+  For more help use:
+    AnsysMinerva_CLI.exe help claim
+
+download
+
+Download Minerva items to the local working directory.
+
+  Usage:
+    AnsysMinerva_CLI.exe download [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+      [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-c|--content <Content>]
+      [-d|--dependencies <Dependencies>] [--interactive <None|Console|Graphical>] [-l|--local <Local>]
+      [-n|--no-session ""False""] [-o|--overwrite <Error|Overwrite|Append|Ignore|Snapshot>] [--output <Output>]
+      [-p|--path <Path>] [--remote-start <Remote-Start>] [-r|--remote <Remote> ...] [-u|--url <Url>]
+
+  Examples:
+
+    Download a file with no session:
+      AnsysMinerva_CLI.exe download --no-session --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url
+        http://ServerName/AnsysMinerva
+     or:
+      AnsysMinerva_CLI.exe download --no-session --remote /Tasks/#1000003/Output/Report.xml --url
+        http://ServerName/AnsysMinerva
+
+  For more help use:
+    AnsysMinerva_CLI.exe help download
+
+fetch-status
+
+Query Ansys Minerva and return the latest information for each file in the local working directory.
+
+  Usage:
+    AnsysMinerva_CLI.exe fetch-status --output <Output> [--auth:certconfig <Auth:Certconfig>]
+      [--auth:database <Auth:Database>] [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>]
+      [--auth:user <Auth:User>] [-g|--glob <Glob> ...] [--interactive <None|Console|Graphical>] [-l|--local <Local>]
+      [-u|--url <Url>]
+
+  For more help use:
+    AnsysMinerva_CLI.exe help fetch-status
+
+get-status
+
+If you have used the `stage` command to prepare a list of files for upload, you can use the `get-status` command to see
+which files have been staged.
+
+  Usage:
+    AnsysMinerva_CLI.exe get-status [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--output <Output>]
+
+  Examples:
+
+    Get status of stage files:
+      AnsysMinerva_CLI.exe get-status
+
+  For more help use:
+    AnsysMinerva_CLI.exe help get-status
+
+select-items
+
+Use the select-items command to get information about items in Ansys Minerva which can be used with other commands. If
+you do not explicitly specify the items to select, a file or folder dialog box is displayed in which you can select
+files or folders from the Ansys Minerva data view. The output of this command is a JSON file that describes the items
+selected.
+
+  Usage:
+    AnsysMinerva_CLI.exe select-items --mode <SaveFile|SelectFile|SelectFolder|SelectFileFolder> --output <Output>
+      [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+      [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-d|--dependencies ""False""]
+      [--filter <Filter>] [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--multiSelect ""False""]
+      [--remote-start <Remote-Start>] [-r|--remote <Remote>] [-u|--url <Url>]
+
+  For more help use:
+    AnsysMinerva_CLI.exe help select-items
+
+sign-out
+
+Sign out from Ansys Minerva.
+
+  Usage:
+    AnsysMinerva_CLI.exe sign-out [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--output <Output>]
+      [-u|--url <Url>]
+
+  Examples:
+
+    Sign out of Minerva session:
+      AnsysMinerva_CLI.exe sign-out --url http://ServerName/AnsysMinerva
+
+  For more help use:
+    AnsysMinerva_CLI.exe help sign-out
+
+stage
+
+Use the `stage` command to prepare a list of files for upload to Ansys Minerva. This enables you to determine in advance
+which files you would like to upload, and then upload them at a time of your choosing.
+
+To stage files, you specify a pattern. Any files that match this pattern are flagged to be uploaded later. Although the
+physical directory may contain any number of files, only the staged files will be uploaded. If staging is not used, all
+modified files in the directory will be uploaded when the upload command is used (unless filtering options are added to
+the command).
+
+  Usage:
+    AnsysMinerva_CLI.exe stage [-g|--glob <Glob> ...] [--interactive <None|Console|Graphical>] [-l|--local <Local>]
+      [--output <Output>]
+
+  Examples:
+
+    Stage all files in top-level directory:
+      AnsysMinerva_CLI.exe stage --glob *
+
+    Stage all files in any subdirectory:
+      AnsysMinerva_CLI.exe stage --glob **/*
+
+  For more help use:
+    AnsysMinerva_CLI.exe help stage
+
+unclaim
+
+Unclaim one or more items within Minerva.
+
+  Usage:
+    AnsysMinerva_CLI.exe unclaim [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+      [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-g|--glob <Glob> ...]
+      [--interactive <None|Console|Graphical>] [-l|--local <Local>] [--output <Output>] [-r|--remote <Remote> ...]
+      [-u|--url <Url>]
+
+  Examples:
+
+    Unclaim a file:
+      AnsysMinerva_CLI.exe unclaim --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url
+        http://ServerName/AnsysMinerva
+     or:
+      AnsysMinerva_CLI.exe unclaim --remote /Tasks/#1000003/Output/Report.xml --url http://ServerName/AnsysMinerva
+
+  For more help use:
+    AnsysMinerva_CLI.exe help unclaim
+
+unstage
+
+If the stage command has been used to stage a list of files for upload, you can use the unstage command to remove files
+from the staging list. Files that are removed from the staging list will not be uploaded.
+
+  Usage:
+    AnsysMinerva_CLI.exe unstage [-g|--glob <Glob> ...] [--interactive <None|Console|Graphical>] [-l|--local <Local>]
+      [--output <Output>]
+
+  Examples:
+
+    Unstage all files in top-level directory:
+      AnsysMinerva_CLI.exe unstage --glob *
+
+    Unstage all files in any subdirectory:
+      AnsysMinerva_CLI.exe unstage --glob **/*
+
+  For more help use:
+    AnsysMinerva_CLI.exe help unstage
+
+upload
+
+Use the `upload` command to upload files from a local directory to Ansys Minerva. If files have been staged with the
+`stage` command, staged files will be uploaded. Otherwise, all files will be uploaded. If the `--glob` option is used to
+search for a specific file pattern, all files matching the specified pattern will be uploaded.
+
+  Usage:
+    AnsysMinerva_CLI.exe upload [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+      [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-c|--close-session ""False""]
+      [-g|--glob <Glob> ...] [--interactive <None|Console|Graphical>] [-l|--local <Local>] [-n|--no-session ""False""]
+      [-o|--overwrite <Error|Overwrite|Append|Ignore|Snapshot>] [--output <Output>] [--remote-start <Remote-Start>]
+      [-r|--remote <Remote>] [-u|--url <Url>]
+
+  Examples:
+
+    Upload all files in the current working directory:
+      AnsysMinerva_CLI.exe upload --no-session --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url
+        http://ServerName/AnsysMinerva
+
+    Upload all *.txt files in any directory in current working directory:
+      AnsysMinerva_CLI.exe upload --glob **/*.txt --no-session --remote ans_Data/3B53CA6B992042D481A4EC3359A3EA59 --url
+        http://ServerName/AnsysMinerva
+
+  For more help use:
+    AnsysMinerva_CLI.exe help upload
+
+For complete help use:
+  AnsysMinerva_CLI.exe help --all
+", actual);
+		}
+
+		[IgnoreForLinuxTheory(DisplayName = "Version number should be displayed ")]
+		[InlineData("version")]
+		[InlineData("version --flag")]
+		[InlineData("--version")]
+		[InlineData("download --version")]
+		public void VersionRequestShouldReturnVersionNumber(string commandLine)
+		{
+			var options = GetHelpOptions(commandLine.Split(' '));
+			Assert.False(options.All);
+			Assert.Null(options.Output);
+			var version = "1.2.3";
+			var output = new HelpCommand.HelpOutput(options, version);
+			var actual = output.ToString();
+			Assert.Equal(@"AnsysMinerva_CLI 1.2.3
+(c) 2024 ANSYS, Inc.  All rights reserved.
+
+", actual);
+		}
+
+		[IgnoreForLinuxTheory(DisplayName = "Help should be displayed for the specified verb ")]
+		[InlineData("help download --output stream://stdout")]
+		[InlineData("help --output stream://stdout download")]
+		[InlineData("download --output stream://stdout --help")]
+		[InlineData("download --help --output stream://stdout")]
+		public void VerbSpecificHelpShouldBeReturnedFromBothHelpVerbAndHelpFlag(string commandLine)
+		{
+			var options = GetHelpOptions(commandLine.Split(' '));
+			Assert.False(options.All);
+			Assert.Equal("stream://stdout", options.Output);
+			Assert.Equal("download", options.Verb);
+			var version = "1.2.3";
+			var output = new HelpCommand.HelpOutput(options, version);
+			Assert.Null(output.Error);
+			Assert.False(output.IsError);
+			Assert.Equal(version, output.Version);
+			var downloadCommand = Assert.Single(output.Commands);
+			Assert.Equal("download", downloadCommand.Name);
+			Assert.Equal(@"AnsysMinerva_CLI 1.2.3
+(c) 2024 ANSYS, Inc.  All rights reserved.
+
+Download Minerva items to the local working directory.
+
+Usage:
+  AnsysMinerva_CLI.exe download [--auth:certconfig <Auth:Certconfig>] [--auth:database <Auth:Database>]
+    [--auth:mode <Explicit|Impersonate|Refresh_Token|Windows>] [--auth:user <Auth:User>] [-c|--content <Content>]
+    [-d|--dependencies <Dependencies>] [--interactive <None|Console|Graphical>] [-l|--local <Local>]
+    [-n|--no-session ""False""] [-o|--overwrite <Error|Overwrite|Append|Ignore|Snapshot>] [--output <Output>]
+    [-p|--path <Path>] [--remote-start <Remote-Start>] [-r|--remote <Remote> ...] [-u|--url <Url>]
+
+Examples:
+
+  Download a file with no session:
+    AnsysMinerva_CLI.exe download --no-session --remote ans_Data/7BEC3A1D84744EC994E01DD82697910B --url
+      http://ServerName/AnsysMinerva
+   or:
+    AnsysMinerva_CLI.exe download --no-session --remote /Tasks/#1000003/Output/Report.xml --url
+      http://ServerName/AnsysMinerva
+
+  Download a directory structure with no session:
+    AnsysMinerva_CLI.exe download --no-session --remote /Data/Test2/Utility --url http://ServerName/AnsysMinerva
+   or:
+    AnsysMinerva_CLI.exe download --no-session --remote /Tasks/#1000003/Output --url http://ServerName/AnsysMinerva
+
+  Download a directory structure to a relative path:
+    AnsysMinerva_CLI.exe download --no-session --path DirectoryStructure --remote /Data/Test2/Utility --url
+      http://ServerName/AnsysMinerva
+
+  Download multiple remotes relative path:
+    AnsysMinerva_CLI.exe download --no-session --path MultipleRemotes --remote /Data/Test2/Utility Data/Test1/MyFile.txt
+      --url http://ServerName/AnsysMinerva
+
+  Download a directory contents to a relative path:
+    AnsysMinerva_CLI.exe download --content --no-session --path DirectoryContent --remote Data/Test2/Utility --url
+      http://ServerName/AnsysMinerva
+
+Options:
+  --auth:certconfig   (Optional) The path to an `OAuth.config` file describing a trusted certificate which can be used
+                      for impersonation. The `ANS_MINERVA_AUTH__CERTCONFIG` environment variable or { ""Auth"": {
+                      ""CertConfig"": """" } } option in the `appsettings.json` file can also be used to set this value.
+  --auth:database     (Optional) The name of the database to connect to. The `ANS_MINERVA_AUTH__DATABASE` environment
+                      variable or { ""Auth"": { ""Database"": """" } } option in the `appsettings.json` file can also be used
+                      to set this value.
+  --auth:mode         (Optional) The type of authentication to use. If not specified, the user will be prompted to sign
+                      in using a graphical interface. The `ANS_MINERVA_AUTH__MODE` environment variable or { ""Auth"": {
+                      ""Mode"": """" } } option in the `appsettings.json` file can also be used to set this value.
+                      - Explicit: The user name and password will be provided for Ansys Minerva authentication.
+                      - Impersonate: The path to a trusted certificate will be provided which allows for impersonating
+                      any Ansys Minerva account.
+                      - Refresh_Token: An OAuth server refresh token will be provided.
+                      - Windows: The user name and password will be provided for use with Windows (NTLM/Kerberos)
+                      authentication.
+  --auth:user         (Optional) The name of the user to connect as. The `ANS_MINERVA_AUTH__USER` environment variable
+                      or { ""Auth"": { ""User"": """" } } option in the `appsettings.json` file can also be used to set this
+                      value.
+  -c, --content       (Optional) When a folder is downloaded, a directory is created on disk with the name of the
+                      folder. The contents are downloaded inside of that directory. If this flag is set, the root
+                      directory is not created, and the contents are downloaded directly. For example, consider a folder
+                      `MyFolder` with one file `File.ext`. By default, the structure `MyFolder/File.ext` is created on
+                      disk. When `--content` is specified, only the structure `File.ext` is created.
+  -d, --dependencies  (Optional) Download each file's dependencies (`Depends On` relationships) in addition to the file.
+                      By default, only the requested files are downloaded.
+  --interactive       (Optional) Specify the user interface to use. The `ANS_MINERVA_INTERACTIVE` environment variable
+                      or { ""Interactive"": """" } option in the `appsettings.json` file can also be used to set this value.
+                      - Console: The application is run from an interactive console window. Status messages and prompts
+                      will appear on the console.
+                      - Graphical: The application is run from a desktop with graphics. Status messages and prompts will
+                      appear in a graphical window.
+                      - None: The application is run in batch mode. If required options are not fully specified, and
+                      error will be raised.
+  -l, --local         (Optional) Specifies the local folder to which files will be downloaded (for example,
+                      `C:\MinervaSession`). The `ANS_MINERVA_LOCAL` environment variable or { ""Local"": """" } option in
+                      the `appsettings.json` file can also be used to set this value. If not specified at all, the
+                      current working directory of the process will be used by default.
+  -n, --no-session    (Optional) (Default: False) Skip creating a session for tracking the digital thread. Only use this
+                      option if modified versions of the downloaded files will not be uploaded back into Ansys Minerva.
+  -o, --overwrite     (Optional) (Default: Error) When a local file of the same name already exists in the target
+                      folder, this specifies whether the downloaded file should overwrite the local file. If not
+                      specified, an error is thrown by default.
+                      - Append: Keep the existing files and add new files with appended names.
+                      - Error: Throw an error if any file will be overwritten.
+                      - Ignore: Do not transfer the conflicting files.
+                      - Overwrite: Silently overwrite any existing files with the new files.
+                      - Snapshot: Create a minor version for un-released files of the same name. Create a major version
+                      for released files.
+  --output            (Optional) Outputs JSON data containing information about the items involved during command
+                      process. The JSON can be written to one of the following locations:
+                      - A relative path such as `some/folder/file.json`
+                      - An absolute path such as `C:/temp/log.json`
+                      - A data stream such as `stream://stdout` or `stream://stderr`
+  -p, --path          (Optional) Relative path of a folder within the working directory to which files will be
+                      downloaded (for example, `Subdir1/Subdir2`).
+  --remote-start      (Optional) If you are not using the `--remote` option, this specifies the file or folder to be
+                      shown when the browser dialog box is first displayed. By default, the `Data` folder is shown. The
+                      path of the remote item can be specified in one of the following ways:
+                      - An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+                      - A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)
+  -r, --remote        (Optional) Specifies a remote item to be downloaded. If not specified, a browser dialog box will
+                      be displayed in which files and/or folders can be selected. Acceptable formats include:
+                      - An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+                      - A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)
+                      If downloading multiple items, separate them with a space (for example, `-r
+                      ans_Data/5F938BED154E4128B552C9F83264CDAE /Data/Directory1/Dir2`)
+  -u, --url           (Optional) The Ansys Minerva URL (for example, `https://server/AnsysMinerva`). If not specified as
+                      a command line option, the `ANS_MINERVA_URL` environment variable or { ""Url"": """" } option in the
+                      `appsettings.json` file should be set.
+  --help              Display this help screen.
+  --version           Display version information.
+
+Environment:
+  ANS_MINERVA_AUTH__PASSWORD  (Optional) The user's password.
+  ANS_MINERVA_AUTH__TOKEN     (Optional) The OIDC refresh token to use for authentication.
+", output.ToString());
+		}
+
+		private HelpOptions GetHelpOptions(params string[] args)
+		{
+			var options = Assert.IsType<HelpOptions>(GetOptions(args));
+			Assert.Equal(args, options.Arguments);
+			Assert.NotNull(options.ParserResult);
+			return options;
+		}
+
+		private static object GetOptions(params string[] args)
+		{
+			return CommandLineParser<HelpOptions>.Parse(args, _verbs);
+		}
+
+		[Verb("download", HelpText = "Download Minerva items to the local working directory.")]
+		private class DownloadOptions : RemoteOptions
+		{
+			[Option('r', "remote", Required = false, Min = 1, Max = 10,
+				HelpText = @"Specifies a remote item to be downloaded. If not specified, a browser dialog box will be displayed in which files and/or folders can be selected. Acceptable formats include:
+- An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+- A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)
+If downloading multiple items, separate them with a space (for example, `-r ans_Data/5F938BED154E4128B552C9F83264CDAE /Data/Directory1/Dir2`)")]
+			public IList<string> Remote { get; set; }
+
+			[Option(longName: "remote-start", Required = false,
+				HelpText = @"If you are not using the `--remote` option, this specifies the file or folder to be shown when the browser dialog box is first displayed. By default, the `Data` folder is shown. The path of the remote item can be specified in one of the following ways:
+- An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+- A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)")]
+			public string? RemoteStart { get; set; }
+
+			[Option('n', "no-session", Required = false, Default = false, HelpText = "Skip creating a session for tracking the digital thread. Only use this option if modified versions of the downloaded files will not be uploaded back into Ansys Minerva.")]
+			public bool NoSession { get; set; }
+
+			[Option('p', "path", Required = false, HelpText = "Relative path of a folder within the working directory to which files will be downloaded (for example, `Subdir1/Subdir2`).")]
+			public string Path { get; set; }
+
+			[Option('c', "content", Required = false,
+				HelpText = "When a folder is downloaded, a directory is created on disk with the name of the folder. The contents are downloaded inside of that directory. If this flag is set, the root directory is not created, and the contents are downloaded directly. For example, consider a folder `MyFolder` with one file `File.ext`. By default, the structure `MyFolder/File.ext` is created on disk. When `--content` is specified, only the structure `File.ext` is created.")]
+			public bool Content { get; set; }
+
+			[Option('d', "dependencies", Required = false,
+				HelpText = "Download each file's dependencies (`Depends On` relationships) in addition to the file. By default, only the requested files are downloaded.")]
+
+			public bool Dependencies { get; set; }
+
+			[Option('o', "overwrite", Required = false,
+				HelpText = @"When a local file of the same name already exists in the target folder, this specifies whether the downloaded file should overwrite the local file. If not specified, an error is thrown by default.")]
+			public OverwriteBehavior Overwrite { get; set; }
+
+			[Usage(ApplicationAlias = "AnsysMinerva_CLI.exe")]
+			public static IEnumerable<Example> Examples
+			{
+				get
+				{
+					return new List<Example>()
+					{
+						new Example("\nDownload a file with no session", new DownloadOptions { Remote = sampleRemote, Url = "http://ServerName/AnsysMinerva", NoSession = true }),
+						new Example("\tor", new DownloadOptions { Remote = new string[] {"/Tasks/#1000003/Output/Report.xml" }, Url = "http://ServerName/AnsysMinerva", NoSession = true }),
+						new Example("\nDownload a directory structure with no session", new DownloadOptions { Url = "http://ServerName/AnsysMinerva", NoSession = true, Remote = new List<string> { "/Data/Test2/Utility" } }),
+						new Example("\tor", new DownloadOptions { Remote = new string[] {"/Tasks/#1000003/Output" }, Url = "http://ServerName/AnsysMinerva", NoSession = true }),
+						new Example("\nDownload a directory structure to a relative path", new DownloadOptions { Url = "http://ServerName/AnsysMinerva", NoSession = true, Remote = new List<string> { "/Data/Test2/Utility" }, Path = "DirectoryStructure" }),
+						new Example("\nDownload multiple remotes relative path", new DownloadOptions { Url = "http://ServerName/AnsysMinerva", NoSession = true, Remote = new List<string> { "/Data/Test2/Utility", "Data/Test1/MyFile.txt" }, Path = "MultipleRemotes" }),
+						new Example("\nDownload a directory contents to a relative path", new DownloadOptions { Url = "http://ServerName/AnsysMinerva", NoSession = true, Remote = new List<string> {"Data/Test2/Utility" }, Content = true, Path = "DirectoryContent" }),
+					};
+				}
+			}
+		}
+
+		[Verb("claim", HelpText = "Claim one or more items within Minerva for exclusive editing.")]
+		private class ClaimOptions : BaseClaimOptions
+		{
+			[Option('r', "remote", Required = false, Min = 1, Max = 10,
+				HelpText = @"Specifies a remote item to be claimed. If not specified, a browser dialog box will be displayed in which files and/or folders can be selected. Acceptable formats include:
+- An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+- A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)
+If claiming multiple items, separate them with a space (for example, `-r ans_Data/5F938BED154E4128B552C9F83264CDAE /Data/Directory1/Dir2`)")]
+			public override IList<string>? Remote { get; set; }
+
+			[Option('g', "glob", Required = false, Min = 1, Max = 500, HelpText = "One or more (space-delimited) glob patterns describing which files or folders to claim.")]
+			public override IList<string>? Glob { get; set; }
+
+			[Usage(ApplicationAlias = "AnsysMinerva_CLI.exe")]
+			public static IEnumerable<Example> Examples
+			{
+				get
+				{
+					return new List<Example>()
+					{
+						new Example("\nClaim a file", new ClaimOptions { Remote = sampleRemote, Url = "http://ServerName/AnsysMinerva"}),
+						new Example("\tor", new ClaimOptions { Remote = new string[] {"/Tasks/#1000003/Output/Report.xml" }, Url = "http://ServerName/AnsysMinerva"}),
+						new Example("\nClaim a directory", new ClaimOptions { Url = "http://ServerName/AnsysMinerva", Remote = new List<string> { "/Data/Test2/Utility" } }),
+						new Example("\nClaim multiple remotes relative path", new ClaimOptions { Url = "http://ServerName/AnsysMinerva", Remote = new List<string> { "/Data/Test2/Utility", "Data/Test1/MyFile.txt" } }),
+						new Example("\nClaim a remote file and all .txt files in current directory", new ClaimOptions { Remote = new string[] { "ans_Data/7BEC3A1D84744EC994E01DD82697910B" }, Url = "http://ServerName/AnsysMinerva", Glob = sampleGlob})
+					};
+				}
+			}
+		}
+
+		[Verb("unclaim", HelpText = "Unclaim one or more items within Minerva.")]
+		private class UnclaimOptions : BaseClaimOptions
+		{
+			[Option('r', "remote", Required = false, Min = 1, Max = 10,
+				HelpText = @"Specifies a remote item to be unclaimed. Acceptable formats include:
+- An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+- A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)
+If unclaiming multiple items, separate them with a space (for example, `-r ans_Data/5F938BED154E4128B552C9F83264CDAE /Data/Directory1/Dir2`)")]
+			public override IList<string>? Remote { get; set; }
+
+			[Option('g', "glob", Required = false, Min = 1, Max = 500, HelpText = "One or more (space-delimited) glob patterns describing which files or folders to unclaim.")]
+			public override IList<string>? Glob { get; set; }
+
+			[Usage(ApplicationAlias = "AnsysMinerva_CLI.exe")]
+			public static IEnumerable<Example> Examples
+			{
+				get
+				{
+					return new List<Example>()
+					{
+						new Example("\nUnclaim a file", new UnclaimOptions { Remote = sampleRemote, Url = "http://ServerName/AnsysMinerva"}),
+						new Example("\tor", new UnclaimOptions { Remote = new string[] {"/Tasks/#1000003/Output/Report.xml" }, Url = "http://ServerName/AnsysMinerva"}),
+						new Example("\nUnclaim a directory", new UnclaimOptions { Url = "http://ServerName/AnsysMinerva", Remote = new List<string> { "/Data/Test2/Utility" } }),
+						new Example("\nUnclaim multiple remotes relative path", new UnclaimOptions { Url = "http://ServerName/AnsysMinerva", Remote = new List<string> { "/Data/Test2/Utility", "Data/Test1/MyFile.txt" } }),
+						new Example("\nUnclaim a remote file and all .txt files in current directory", new UnclaimOptions { Remote = new string[] { "ans_Data/7BEC3A1D84744EC994E01DD82697910B" }, Url = "http://ServerName/AnsysMinerva", Glob = sampleGlob })
+					};
+				}
+			}
+		}
+
+		[Verb("get-status", HelpText = "If you have used the `stage` command to prepare a list of files for upload, you can use the `get-status` command to see which files have been staged.")]
+		private class GetStatusOptions : GlobalOptions
+		{
+			[Usage(ApplicationAlias = "AnsysMinerva_CLI.exe")]
+			public static IEnumerable<Example> Examples
+			{
+				get
+				{
+					return new List<Example>()
+					{
+						new Example("\nGet status of stage files", new GetStatusOptions {}),
+					};
+				}
+			}
+		}
+
+		[Verb("sign-out", HelpText = "Sign out from Ansys Minerva.")]
+		private class SignOutOptions : GlobalOptions
+		{
+			[Option('u', "url", Required = false, HelpText = "The Ansys Minerva URL (for example, `https://server/AnsysMinerva`). If not specified as a command line option, the `ANS_MINERVA_URL` environment variable or { \"Url\": \"\" } option in the `appsettings.json` file should be set.")]
+			public string? Url { get; set; }
+
+			[Usage(ApplicationAlias = "AnsysMinerva_CLI.exe")]
+			public static IEnumerable<Example> Examples
+			{
+				get
+				{
+					return new List<Example>()
+					{
+						new Example("\nSign out of Minerva session", new SignOutOptions { Url = "http://ServerName/AnsysMinerva" }),
+					};
+				}
+			}
+		}
+
+		[Verb("stage", HelpText = @"Use the `stage` command to prepare a list of files for upload to Ansys Minerva. This enables you to determine in advance which files you would like to upload, and then upload them at a time of your choosing.
+
+To stage files, you specify a pattern. Any files that match this pattern are flagged to be uploaded later. Although the physical directory may contain any number of files, only the staged files will be uploaded. If staging is not used, all modified files in the directory will be uploaded when the upload command is used (unless filtering options are added to the command).")]
+		private class StageOptions : GlobalOptions
+		{
+			[Option('g', "glob", Required = false, Min = 1, Max = 500, HelpText = "One or more (space-delimited) glob patterns describing which files or folders to stage for upload.")]
+			public IList<string>? Glob { get; set; }
+
+			[Usage(ApplicationAlias = "AnsysMinerva_CLI.exe")]
+			public static IEnumerable<Example> Examples
+			{
+				get
+				{
+					return new List<Example>()
+					{
+						new Example("\nStage all files in top-level directory", new StageOptions {Glob = new string[] {"*" } }),
+						new Example("\nStage all files in any subdirectory", new StageOptions {Glob = new string[] {"**/*" } }),
+						new Example("\nStage all files in any subdirectory under 'dir/'", new StageOptions {Glob = new string[] { "dir/**/*" } }),
+						new Example("\nStage all files with .txt file extension in root directory", new StageOptions {Glob = sampleGlob }),
+						new Example("\nStage all files with .txt file extension from root directory recursively", new StageOptions {Glob = new string[] { "**/*.txt" } }),
+						new Example("\nStage all files with 'word' in the filename", new StageOptions {Glob = fileWithWordGlob }),
+						new Example("\nStage all files with extension '.css' in the directory 'styles/'", new StageOptions {Glob = cssFileGlob }),
+						new Example("\nStage all .txt and .rst files in current directory using multiple globs", new StageOptions {Glob = sampleMultipleGlobs }),
+					};
+				}
+			}
+		}
+
+		[Verb("unstage", HelpText = "If the stage command has been used to stage a list of files for upload, you can use the unstage command to remove files from the staging list. Files that are removed from the staging list will not be uploaded.")]
+		private class UnstageOptions : GlobalOptions
+		{
+			[Option('g', "glob", Required = false, Min = 1, Max = 500, HelpText = "One or more (space-delimited) glob patterns describing which files or folders should not be uploaded.")]
+			public IList<string>? Glob { get; set; }
+
+			[Usage(ApplicationAlias = "AnsysMinerva_CLI.exe")]
+			public static IEnumerable<Example> Examples
+			{
+				get
+				{
+					return new List<Example>()
+					{
+						new Example("\nUnstage all files in top-level directory", new UnstageOptions {Glob = new string[] {"*" } }),
+						new Example("\nUnstage all files in any subdirectory", new UnstageOptions {Glob = new string[] {"**/*" } }),
+						new Example("\nUnstage all files in any subdirectory under 'dir/'", new UnstageOptions {Glob = new string[] { "dir/**/*" } }),
+						new Example("\nUnstage all files with .txt file extension in root directory", new UnstageOptions {Glob = sampleGlob }),
+						new Example("\nUnstage all files with .txt file extension from root directory recursively", new UnstageOptions {Glob = new string[] { "**/*.txt" } }),
+						new Example("\nUnstage all files with 'word' in the filename", new UnstageOptions {Glob = fileWithWordGlob }),
+						new Example("\nUnstage all files with extension '.css' in the directory 'styles/'", new UnstageOptions {Glob = cssFileGlob }),
+						new Example("\nUnstage all .txt and .rst files in current directory using multiple globs", new UnstageOptions {Glob = sampleMultipleGlobs }),
+					};
+				}
+			}
+		}
+
+		[Verb("upload", HelpText = @"Use the `upload` command to upload files from a local directory to Ansys Minerva. If files have been staged with the `stage` command, staged files will be uploaded. Otherwise, all files will be uploaded. If the `--glob` option is used to search for a specific file pattern, all files matching the specified pattern will be uploaded.")]
+		private class UploadOptions : RemoteOptions
+		{
+			[Option('r', "remote", Required = false,
+				HelpText = @"Specifies a remote location in Ansys Minerva to which files are to be uploaded. If not specified, a browser dialog box will be displayed in which a folder can be selected. Acceptable formats include:
+- An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+- A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)")]
+			public string? Remote { get; set; }
+
+			[Option(longName: "remote-start", Required = false,
+				HelpText = @"If you are not using the `--remote` option, this specifies the file or folder to be shown when the browser dialog box is first displayed. By default, the `Data` folder is shown. The path of the remote item can be specified in one of the following ways:
+- An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+- A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)")]
+			public string? RemoteStart { get; set; }
+
+			[Option('n', "no-session", Required = false, Default = false, HelpText = "Skip creating a full session for tracking the flow of data in the digital thread (or close the existing session immediately after files are transferred).")]
+			public bool NoSession { get; set; }
+
+			[Option('g', "glob", Required = false, Min = 1, Max = 500,
+				HelpText = "One or more (space-delimited) glob patterns describing which files or folders to stage for upload. If not specified, all staged files will be uploaded.")]
+			public IList<string>? Glob { get; set; }
+
+			[Option('o', "overwrite", Required = false,
+				HelpText = @"When a remote file of the same name already exists in Ansys Minerva, this specifies whether the uploaded file should overwrite the existing file. If not specified, an error is thrown by default.")]
+			public OverwriteBehavior Overwrite { get; set; }
+
+			[Option('c', "close-session", Required = false, Default = false, HelpText = "Close the session after upload is complete.")]
+			public bool CloseSession { get; set; }
+
+			[Usage(ApplicationAlias = "AnsysMinerva_CLI.exe")]
+			public static IEnumerable<Example> Examples
+			{
+				get
+				{
+					return new List<Example>()
+					{
+						new Example("\nUpload all files in the current working directory", new UploadOptions { Remote = "ans_Data/7BEC3A1D84744EC994E01DD82697910B", Url = "http://ServerName/AnsysMinerva", NoSession = true }),
+						new Example("\nUpload all *.txt files in any directory in current working directory", new UploadOptions { Remote = "ans_Data/3B53CA6B992042D481A4EC3359A3EA59", Url = "http://ServerName/AnsysMinerva", NoSession = true, Glob = new string[] { "**/*.txt" } }),
+						new Example("\nUpload all files in any subdirectory under 'dir/'", new UploadOptions { Remote = "ans_Data/3B53CA6B992042D481A4EC3359A3EA59", Url = "http://ServerName/AnsysMinerva", NoSession = true, Glob = new string[] { "dir/**/*" } }),
+						new Example("\nUpload all files with 'word' in the filename", new UploadOptions { Remote = "ans_Data/3B53CA6B992042D481A4EC3359A3EA59", Url = "http://ServerName/AnsysMinerva", NoSession = true, Glob = fileWithWordGlob }),
+						new Example("\nUpload all .txt and .rst files in current directory using multiple globs", new UploadOptions { Remote = "ans_Data/7BEC3A1D84744EC994E01DD82697910B", Url = "http://ServerName/AnsysMinerva", NoSession = true, Glob = sampleMultipleGlobs}),
+					};
+				}
+			}
+		}
+
+		[Verb("select-items", HelpText = @"Use the select-items command to get information about items in Ansys Minerva which can be used with other commands. If you do not explicitly specify the items to select, a file or folder dialog box is displayed in which you can select files or folders from the Ansys Minerva data view. The output of this command is a JSON file that describes the items selected.")]
+		private class SelectItemsOptions : RemoteOptions
+		{
+			[Option(longName: "mode", Required = true,
+				HelpText = @"The type of selection that is allowed.")]
+			public SelectItemsMode Mode { get; set; }
+
+			[Option(longName: "output", Required = true,
+				HelpText = @"Outputs JSON data containing information about the items which were selected. The JSON can be written to one of the following locations:
+- A relative path such as `some/folder/file.json`
+- An absolute path such as `C:/temp/log.json`
+- A data stream such as `stream://stdout` or `stream://stderr`")]
+			public override string? Output { get; set; }
+
+			[Option('r', "remote", Required = false,
+				HelpText = @"Specifies a remote item to be downloaded. If not specified, a browser dialog box will be displayed in which files and/or folders can be selected. Acceptable formats include:
+- An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+- A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)
+If downloading multiple items, separate them with a space (for example, `-r ans_Data/5F938BED154E4128B552C9F83264CDAE /Data/Directory1/Dir2`)")]
+			public IList<string>? Remote { get; set; }
+
+			[Option(longName: "remote-start", Required = false,
+				HelpText = @"If you are not using the `--remote` option, this specifies the file or folder to be shown when the browser dialog box is first displayed. By default, the `Data` folder is shown. The path of the remote item can be specified in one of the following ways:
+- An Ansys Minerva identifier (for example, `ans_Data/5F938BED154E4128B552C9F83264CDAE`)
+- A full path within Ansys Minerva begins with a `/` (for example, `/Data/Directory1/Dir2`)")]
+			public string? RemoteStart { get; set; }
+
+			[Option(longName: "multiSelect", Required = false, Default = false,
+				HelpText = "Specifies that multiple items can be selected. By default, only one item can be selected.")]
+			public bool MultiSelect { get; set; }
+
+			[Option(longName: "filter", Required = false,
+				HelpText = "Describes the file extension choices to be shown in the 'Save as file type' or 'Files of type' drop-down in the dialog box. (For example, `Image Files(*.BMP;*.JPG;*.GIF)|*.BMP;*.JPG;*.GIF|All files (*.*)|*.*`)")]
+			public string? Filter { get; set; }
+
+			[Option('d', "dependencies", Required = false, Default = false,
+				HelpText = "Get information about each file's dependencies (`Depends On` relationships) in addition to the file. By default, only the requested files are included.")]
+			public bool Dependencies { get; set; }
+		}
+
+		[Verb("local-application", Hidden = true, HelpText = "Launch local application")]
+		private class LocalApplicationOptions : RemoteOptions
+		{
+			[Option(longName: "applicationId", Required = true, HelpText = "ID of the ans_Application which defines how to run the application")]
+			public string? ApplicationId { get; set; }
+
+			[Option(longName: "input", Required = true, HelpText = "Paths to the input files to download")]
+			public IEnumerable<string>? Inputs { get; set; }
+
+			[Option(longName: "output", Required = false, HelpText = "Path to the upload location")]
+			public override string? Output { get; set; }
+
+			// Ansys optiSLang Post with export_file_permissions=Read does not provide a jobId, so don't make it required. Refer to DE841533.
+			[Option(longName: "job", Required = false, HelpText = "Job Id")]
+			public string? Job { get; set; }
+
+			[Option(longName: "overwrite", Required = false, HelpText = "Specifies how conflicts with local files should be handled.")]
+			public OverwriteBehavior Overwrite { get; set; }
+
+			/// <summary>
+			/// Additional query string values in the URL
+			/// </summary>
+			[Option(longName: "onstart", Required = false, Hidden = true, HelpText = "")]
+			public string? OnStart { get; set; }
+			[Option(longName: "oncomplete", Required = false, Hidden = true, HelpText = "")]
+			public string? OnComplete { get; set; }
+			[Option(longName: "onprogress", Required = false, Hidden = true, HelpText = "")]
+			public string? OnProgress { get; set; }
+			[Option(longName: "args", Required = false, HelpText = "")]
+			public string? ApplicationArgs { get; set; }
+			[Option(longName: "env", Required = false, HelpText = "")]
+			public string? Environment { get; set; }
+		}
+
+		[Verb("fetch-status", HelpText = @"Query Ansys Minerva and return the latest information for each file in the local working directory.")]
+		private class FetchStatusOptions : RemoteOptions
+		{
+			[Option(longName: "output", Required = true,
+				HelpText = @"Outputs JSON data containing information about the items which were selected. The JSON can be written to one of the following locations:
+- A relative path such as `some/folder/file.json`
+- An absolute path such as `C:/temp/log.json`
+- A data stream such as `stream://stdout` or `stream://stderr`")]
+			public override string? Output { get; set; }
+
+			[Option('g', "glob", Required = false, Min = 1, Max = 500,
+				HelpText = "One or more (space-delimited) glob patterns describing which files or folders to stage for upload. If not specified, all staged files will be uploaded.")]
+			public IList<string>? Glob { get; set; }
+		}
+
+		private class BaseClaimOptions : RemoteOptions
+		{
+			public virtual IList<string>? Remote { get; set; }
+
+			public virtual IList<string>? Glob { get; set; }
+		}
+
+		private class RemoteOptions : GlobalOptions
+		{
+			[Option('u', "url", Required = false, HelpText = "The Ansys Minerva URL (for example, `https://server/AnsysMinerva`). If not specified as a command line option, the `ANS_MINERVA_URL` environment variable or { \"Url\": \"\" } option in the `appsettings.json` file should be set.")]
+			public string? Url { get; set; }
+			[Option("auth:mode", HelpText = "The type of authentication to use. If not specified, the user will be prompted to sign in using a graphical interface. The `ANS_MINERVA_AUTH__MODE` environment variable or { \"Auth\": { \"Mode\": \"\" } } option in the `appsettings.json` file can also be used to set this value.")]
+			[ConfigurationKeyName("auth:mode")]
+			public AuthMode? AuthMode { get; set; }
+			[Option("auth:database", HelpText = "The name of the database to connect to. The `ANS_MINERVA_AUTH__DATABASE` environment variable or { \"Auth\": { \"Database\": \"\" } } option in the `appsettings.json` file can also be used to set this value.")]
+			[ConfigurationKeyName("auth:database")]
+			public string? Database { get; set; }
+			[Option("auth:user", HelpText = "The name of the user to connect as. The `ANS_MINERVA_AUTH__USER` environment variable or { \"Auth\": { \"User\": \"\" } } option in the `appsettings.json` file can also be used to set this value.")]
+			[ConfigurationKeyName("auth:user")]
+			public string? User { get; set; }
+			[EnvVarOption("ANS_MINERVA_AUTH__PASSWORD", HelpText = "The user's password.")]
+			public string? Password { get; } = Environment.GetEnvironmentVariable("ANS_MINERVA_AUTH__PASSWORD");
+			[Option("auth:certconfig", HelpText = "The path to an `OAuth.config` file describing a trusted certificate which can be used for impersonation. The `ANS_MINERVA_AUTH__CERTCONFIG` environment variable or { \"Auth\": { \"CertConfig\": \"\" } } option in the `appsettings.json` file can also be used to set this value.")]
+			[ConfigurationKeyName("auth:certconfig")]
+			public string? CertConfig { get; set; }
+			[EnvVarOption("ANS_MINERVA_AUTH__TOKEN", HelpText = "The OIDC refresh token to use for authentication.")]
+			public string? Token { get; set; } = Environment.GetEnvironmentVariable("ANS_MINERVA_AUTH__TOKEN");
+		}
+
+		private abstract class GlobalOptions
+		{
+			[Option('l', "local", Required = false,
+				HelpText = @"Specifies the local folder to which files will be downloaded (for example, `C:\MinervaSession`). The `ANS_MINERVA_LOCAL` environment variable or { ""Local"": """" } option in the `appsettings.json` file can also be used to set this value. If not specified at all, the current working directory of the process will be used by default.")]
+			public string? Local { get; set; }
+			[Option(longName: "output", Required = false,
+			   HelpText = @"Outputs JSON data containing information about the items involved during command process. The JSON can be written to one of the following locations:
+- A relative path such as `some/folder/file.json`
+- An absolute path such as `C:/temp/log.json`
+- A data stream such as `stream://stdout` or `stream://stderr`")]
+			public virtual string? Output { get; set; }
+			[Option("interactive", Required = false,
+				HelpText = @"Specify the user interface to use. The `ANS_MINERVA_INTERACTIVE` environment variable or { ""Interactive"": """" } option in the `appsettings.json` file can also be used to set this value.")]
+			public InteractiveType? Interactive { get; set; }
+			[Option("har", Required = false, Hidden = true,
+				HelpText = @"The path to a *.har file which the application will write. Every HTTP request made by the application will be saved in this file. The `ANS_MINERVA_HAR` environment variable or { ""Har"": """" } option in the `appsettings.json` file can also be used to set this value.")]
+			public string? Har { get; set; }
+			[Option("logfile", Required = false, Hidden = true,
+				HelpText = @"The path to the log file. The `ANS_MINERVA_LOGFILE` environment variable or { ""LogFile"": """" } option in the `appsettings.json` file can also be used to set this value. By default, logs are written to {Local Directory}/.minerva/AnsysMinerva_CLI.log. The log file can be written to one of the following locations:
+- A relative path such as `some/folder/AnsysMinerva_CLI.log`
+- An absolute path such as `C:/temp/AnsysMinerva_CLI.log`
+- A data stream such as `stream://stdout` or `stream://stderr`")]
+			public string? LogFile { get; set; }
+		}
+	}
+}

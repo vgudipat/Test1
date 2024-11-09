@@ -1,0 +1,65 @@
+using Ansys.Minerva.IntegrationFramework.Common.Contract;
+using System.Text.Json;
+using Ansys.Minerva.IntegrationFramework.SdkImpl;
+using System.Threading.Tasks;
+using System;
+using Xunit;
+using System.Collections.Generic;
+
+namespace Ansys.Minerva.CmdTest.SdkImplTests
+{
+	public class OutputManagerTests
+    {
+        public static IEnumerable<object[]> TestErrorData =>
+        new List<object[]>
+        {
+            new object[] { new Exception("Error occurred") },
+            new object[] { new Exception("Error with inner exception occurred",
+                            new UserCanceledException("User cancelled error occurred")) }
+        };
+
+        [Theory]
+        [MemberData(nameof(TestErrorData))]
+        public async Task GenerateErrorOutput_Test(Exception ex)
+        {
+			if (ex.InnerException == null)
+				ex.Data["datakey"] = "datavalue";
+			else
+				ex.InnerException.Data["datakey"] = "datavalue";
+
+			var result = await new CommonOutput().WithError(ex).ToJson();
+			var json = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(result);
+			Assert.NotNull(json);
+			Assert.True(json.TryGetValue("error", out var item));
+			ValidateErrorData(ex, item);
+		}
+
+        private void ValidateErrorData(Exception ex, JsonElement item)
+        {
+            Assert.NotNull(ex);
+            Assert.True(item.TryGetProperty("type", out JsonElement type));
+            Assert.Equal(ex.GetType().Name, type.GetString());
+            Assert.True(item.TryGetProperty("message", out JsonElement message));
+            Assert.Equal(ex.Message, message.GetString());
+            Assert.True(item.TryGetProperty("details", out JsonElement details));
+            if (ex.Data.Count == 0)
+            {
+                Assert.Equal("{}", details.ToString());
+            }
+            else
+            {
+                Assert.True(details.TryGetProperty("datakey", out JsonElement detailsKey));
+                Assert.Equal(ex.Data["datakey"], detailsKey.GetString());
+            }
+            if (ex.InnerException == null)
+            {
+                Assert.False(item.TryGetProperty("innererror", out JsonElement _));
+            }
+            else
+            {
+                Assert.True(item.TryGetProperty("innererror", out JsonElement innererror));
+                ValidateErrorData(ex.InnerException, innererror);
+            }
+        }
+    }
+}

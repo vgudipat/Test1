@@ -1,0 +1,68 @@
+﻿using Ansys.Minerva.IntegrationFramework.SdkImpl;
+using Ansys.Minerva.Sdk;
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Text.Json;
+using Xunit;
+
+namespace Ansys.Minerva.CmdTest
+{
+    internal static class Utils
+    {
+        private static string _cliVersion = string.Empty;
+
+        private static string GetCliVersion()
+        {
+            if (!string.IsNullOrEmpty(_cliVersion))
+                return _cliVersion;
+            if (!OperatingSystem.IsLinux())
+            {
+                var cliExecutable = "AnsysMinerva_CLI.exe";
+                var versionInfo = FileVersionInfo.GetVersionInfo(Path.Combine(Environment.CurrentDirectory, OperatingSystem.IsLinux() ? Path.GetFileNameWithoutExtension(cliExecutable) : cliExecutable));
+                Assert.NotNull(versionInfo);
+                Assert.NotNull(versionInfo.ProductVersion);
+                _cliVersion = versionInfo.ProductVersion;
+            }
+            return _cliVersion;
+        }
+
+        public static void VerifyGeneralLocalCmdOutput(CommandOutputData cmdOutput, string workingDir)
+        {
+            Assert.NotNull(cmdOutput.Local);
+            Assert.Equal(workingDir, Path.GetFullPath(cmdOutput.Local));
+            Assert.NotNull(cmdOutput.Client);
+            Assert.NotNull(cmdOutput.Client.Version);
+            if (!OperatingSystem.IsLinux())
+                Assert.Equal(GetCliVersion(), cmdOutput.Client.Version);
+        }
+
+        public static void VerifyGeneralRemoteCommandOutput(CommandOutputData? cmdOutput, string workingDir, HttpConnection connection)
+        {
+            Assert.NotNull(cmdOutput);
+            VerifyGeneralLocalCmdOutput(cmdOutput, workingDir);
+            Assert.NotNull(cmdOutput.Url);
+            Assert.Contains(cmdOutput.Url, connection.Url.AbsoluteUri, StringComparison.OrdinalIgnoreCase);
+            if (cmdOutput.Auth == null)
+                return;
+            Assert.NotNull(cmdOutput.Auth.User);
+            Assert.NotNull(cmdOutput.Auth.Database);
+            Assert.Contains(cmdOutput.Auth.User, connection.Session.Username, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(cmdOutput.Auth.Database, connection.Session.Database, StringComparison.OrdinalIgnoreCase);
+        }
+        public static bool IsOutputJsonObject(this string source)
+        {
+            if (string.IsNullOrEmpty(source))
+                return false;
+            try
+            {
+                JsonSerializer.Deserialize<CommandOutputData>(source);
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+    }
+}
